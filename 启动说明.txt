@@ -1,0 +1,50 @@
+════════════════════════════════════════
+   全球金融市场监控平台 - 启动说明
+════════════════════════════════════════
+
+【第一步：安装依赖】
+打开终端（命令行），进入本文件夹，运行：
+
+  pip install -r requirements.txt
+
+
+【第二步：配置（可选）】
+- 美股和期货数据不需要任何配置，直接可用
+- A股数据需要 Tushare Token：
+  1. 前往 https://tushare.pro 免费注册
+  2. 登录后进入「个人中心」→「接口TOKEN」
+  3. 打开 config.py，把 Token 填入：
+       TUSHARE_TOKEN = "你的token粘贴在这里"
+  4. 可以在 config.py 里修改自选股列表
+
+
+【第三步：启动】
+在本文件夹下运行：
+
+  streamlit run app.py
+
+浏览器会自动打开 http://localhost:8501
+
+
+【常见问题】
+Q: 提示 ModuleNotFoundError
+A: 确认 requirements.txt 里的包都安装了，重新执行 pip install -r requirements.txt
+
+Q: A股数据显示"未配置Token"
+A: 检查 config.py 里 TUSHARE_TOKEN 是否填写正确
+
+Q: 期货数据加载很慢
+A: 正常，yfinance 批量请求需要几秒；首次加载后会缓存5分钟
+
+
+【文件结构】
+market_monitor/
+├── app.py             ← 主应用（运行这个）
+├── config.py          ← 配置文件（修改这个）
+├── requirements.txt   ← 依赖包
+└── collectors/
+    ├── us_stocks.py   ← 美股数据采集
+    ├── cn_stocks.py   ← A股数据采集
+    └── futures.py     ← 期货数据采集
+
+════════════════════════════════════════
