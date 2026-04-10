@@ -1,18 +1,24 @@
 """
-配置文件 - 在这里填入你的 API Token
+配置文件
+Key 优先从 Streamlit Secrets 读取（部署环境），
+本地开发时从 .streamlit/secrets.toml 读取，
+也可以直接在下方填写（仅限本地，不要提交到 GitHub）
 """
+import os
+
+def _get_secret(key: str, fallback: str = "") -> str:
+    """优先读取 Streamlit secrets，其次读取环境变量，最后用 fallback"""
+    try:
+        import streamlit as st
+        return st.secrets.get(key, fallback)
+    except Exception:
+        return os.environ.get(key, fallback)
 
 # ─── Claude API Key ──────────────────────────────────────────────
-# 1. 前往 https://console.anthropic.com 注册
-# 2. 进入 API Keys -> Create Key
-# 3. 把 sk-ant-... 开头的 Key 填入下方
-CLAUDE_API_KEY = "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"   # <-- 填你的 Claude API Key
+CLAUDE_API_KEY = _get_secret("CLAUDE_API_KEY")
 
 # ─── Tushare Pro Token ───────────────────────────────────────────
-# 1. 前往 https://tushare.pro 注册（免费）
-# 2. 登录后在个人中心 -> 接口TOKEN 获取
-# 3. 填入下方引号内
-TUSHARE_TOKEN = ""   # <-- 填你的 Token，留空则 A 股数据不显示
+TUSHARE_TOKEN = _get_secret("TUSHARE_TOKEN")
 
 # ─── 刷新间隔（秒）──────────────────────────────────────────────
 REFRESH_INTERVAL = 300   # 默认5分钟刷新一次

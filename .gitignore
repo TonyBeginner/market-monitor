@@ -1,0 +1,13 @@
+# Secrets - 绝对不能上传到 GitHub
+.streamlit/secrets.toml
+config_local.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# OS
+.DS_Store
+Thumbs.db
