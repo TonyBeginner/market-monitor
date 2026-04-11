@@ -10,9 +10,17 @@ def _get_secret(key: str, fallback: str = "") -> str:
     """优先读取 Streamlit secrets，其次读取环境变量，最后用 fallback"""
     try:
         import streamlit as st
-        return st.secrets.get(key, fallback)
+        secrets = getattr(st, "secrets", None)
+        if secrets is not None:
+            try:
+                return str(secrets[key])
+            except KeyError:
+                pass
+            except Exception:
+                pass
     except Exception:
-        return os.environ.get(key, fallback)
+        pass
+    return os.environ.get(key, fallback) or fallback
 
 # ─── Claude API Key ──────────────────────────────────────────────
 CLAUDE_API_KEY = _get_secret("CLAUDE_API_KEY")
