@@ -353,10 +353,11 @@ st.markdown("""
 
 # ─── 初始化 Tushare ───────────────────────────────────────────────
 @st.cache_resource
+@st.cache_resource
 def init_tushare():
-    if config.TUSHARE_TOKEN:
-        ok = cn_stocks.init_tushare(config.TUSHARE_TOKEN)
-        return ok
+    token = getattr(config, "TUSHARE_TOKEN", "") or ""
+    if token:
+        return cn_stocks.init_tushare(token)
     return False
 
 
