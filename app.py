@@ -116,7 +116,7 @@ def style_table(df, pct_col="涨跌幅%"):
     """对 DataFrame 应用样式"""
     if df.empty:
         return df
-    styled = df.style.applymap(color_change, subset=[pct_col]) \
+    styled = df.style.map(color_change, subset=[pct_col]) \
                      .format({pct_col: format_pct}) \
                      .set_properties(**{"font-size": "13px"})
     return styled
