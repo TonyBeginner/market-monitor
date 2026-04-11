@@ -66,17 +66,16 @@ def get_index_quote(token: str = None) -> pd.DataFrame:
         index_codes = [code for code, _ in DEFAULT_CN_STOCKS["指数"]]
         name_map    = {code: name for code, name in DEFAULT_CN_STOCKS["指数"]}
 
-        df = _pro.index_daily(
-            ts_code=",".join(index_codes),
-            start_date=(date.today().replace(day=1)).strftime("%Y%m%d"),
-            end_date=today,
-        )
-
-        if df is None or df.empty:
+        # index_daily 不支持多代码拼接，逐个查询
+        frames = []
+        for code in index_codes:
+            tmp = _pro.index_daily(ts_code=code, limit=1)
+            if tmp is not None and not tmp.empty:
+                frames.append(tmp.iloc[[0]])
+        if not frames:
             return _get_mock_index_data()
 
-        # 取最新一天
-        latest = df.sort_values("trade_date").groupby("ts_code").last().reset_index()
+        latest = pd.concat(frames, ignore_index=True)
 
         rows = []
         for _, row in latest.iterrows():
