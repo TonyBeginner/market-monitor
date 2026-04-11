@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import config
 from collectors import us_stocks, cn_stocks, futures, telegram_feed
 from agents import morning_brief as ai_brief
+from utils import github_store
 
 # ─── 页面配置 ─────────────────────────────────────────────────────
 st.set_page_config(
@@ -1147,14 +1148,15 @@ elif page == "🤖 AI 早报":
     brief_dir = os.path.join(os.path.dirname(__file__), "briefs")
     os.makedirs(brief_dir, exist_ok=True)
     brief_path = os.path.join(brief_dir, f"{today_str}.md")
+    github_token = getattr(config, "GITHUB_TOKEN", "") or ""
 
-    # 读取已保存的今日早报
     brief_content = ""
     brief_time = ""
+
+    # 1. 先读本地缓存（本次容器内已生成过）
     if os.path.exists(brief_path):
         with open(brief_path, "r", encoding="utf-8") as f:
             saved = f.read()
-        # 第一行存生成时间，格式：<!-- generated: HH:MM SGT -->
         lines = saved.splitlines()
         if lines and lines[0].startswith("<!-- generated:"):
             brief_time = lines[0].replace("<!-- generated:", "").replace("-->", "").strip()
@@ -1162,13 +1164,24 @@ elif page == "🤖 AI 早报":
         else:
             brief_content = saved
 
-    # 今日早报不存在且已过 08:00 SGT → 自动生成
+    # 2. 本地没有 → 从 GitHub 读取（跨重启持久化）
+    if not brief_content:
+        brief_content, brief_time = github_store.read_brief(today_str)
+        if brief_content:
+            # 写入本地缓存，避免本次运行期间重复拉取
+            with open(brief_path, "w", encoding="utf-8") as f:
+                f.write(f"<!-- generated: {brief_time} -->\n{brief_content}")
+
+    # 3. 仍无早报且已过 08:00 SGT → 自动生成
     if not brief_content and now_sgt.hour >= 8:
         with st.spinner("Claude 正在分析今日市场数据，生成早报…"):
             brief_content = ai_brief.generate_morning_brief()
             brief_time = now_sgt.strftime("%H:%M SGT")
+            # 写本地
             with open(brief_path, "w", encoding="utf-8") as f:
                 f.write(f"<!-- generated: {brief_time} -->\n{brief_content}")
+            # 写 GitHub（持久化）
+            github_store.write_brief(today_str, brief_content, brief_time, github_token)
 
     if brief_content:
         open_panel(f"今日早报 · {today_str}")
