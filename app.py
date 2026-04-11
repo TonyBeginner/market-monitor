@@ -842,11 +842,6 @@ def summarize_market(us_idx: pd.DataFrame, cn_idx: pd.DataFrame, fut_df: pd.Data
         describe(us_idx, "美国市场"),
         describe(cn_idx, "中国市场"),
         describe(fut_df, "商品与期货"),
-        {
-            "label": "刷新节奏",
-            "value": format_refresh_interval(config.REFRESH_INTERVAL),
-            "note": f"本地时间 {datetime.now().strftime('%H:%M:%S')} · 手动刷新可立即更新",
-        },
     ]
     return cards
 
@@ -1132,8 +1127,14 @@ if page == "🏠 市场总览":
     render_micro_status(
         [
             {"label": "A股数据", "value": "在线" if tushare_ok else "待连接", "color": "#1f8f63" if tushare_ok else "#9aa6b2"},
-            {"label": "刷新频率", "value": format_refresh_interval(config.REFRESH_INTERVAL), "color": "#17324a"},
         ]
+    )
+
+    st.markdown(
+        f"<div style='text-align:center;color:#3a4a5a;font-size:0.72rem;margin-top:1.5rem;'>"
+        f"自动刷新 · 每 {format_refresh_interval(config.REFRESH_INTERVAL)} 一次 · "
+        f"本地时间 {datetime.now().strftime('%H:%M:%S')}</div>",
+        unsafe_allow_html=True,
     )
 
 
