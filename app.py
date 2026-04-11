@@ -1137,59 +1137,54 @@ elif page == "🤖 AI 早报":
     )
 
     if not config.CLAUDE_API_KEY:
-        st.error("请先在 config.py 中填入 CLAUDE_API_KEY，然后重启应用。")
-        with st.expander("如何填写？"):
-            st.code("""# 打开 config.py，找到这一行：
-CLAUDE_API_KEY = ""
-
-# 改成（引号内填你的 Key）：
-CLAUDE_API_KEY = "sk-ant-xxxxxx..."
-""", language="python")
+        st.error("请先配置 CLAUDE_API_KEY。")
         st.stop()
 
-    # 已缓存的早报
-    if "brief_content" not in st.session_state:
-        st.session_state.brief_content = ""
-    if "brief_time" not in st.session_state:
-        st.session_state.brief_time = ""
+    from datetime import timezone, timedelta
+    SGT = timezone(timedelta(hours=8))
+    now_sgt = datetime.now(SGT)
+    today_str = now_sgt.strftime("%Y-%m-%d")
+    brief_dir = os.path.join(os.path.dirname(__file__), "briefs")
+    os.makedirs(brief_dir, exist_ok=True)
+    brief_path = os.path.join(brief_dir, f"{today_str}.md")
 
-    open_panel("生成设置")
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        extra = st.text_input("特别关注（可选）", placeholder="例如：重点关注科技股、关注黄金走势")
-    with col2:
-        st.write("")
-        st.write("")
-        gen_btn = st.button("✨ 生成早报", width='stretch', type="primary")
-    close_panel()
+    # 读取已保存的今日早报
+    brief_content = ""
+    brief_time = ""
+    if os.path.exists(brief_path):
+        with open(brief_path, "r", encoding="utf-8") as f:
+            saved = f.read()
+        # 第一行存生成时间，格式：<!-- generated: HH:MM SGT -->
+        lines = saved.splitlines()
+        if lines and lines[0].startswith("<!-- generated:"):
+            brief_time = lines[0].replace("<!-- generated:", "").replace("-->", "").strip()
+            brief_content = "\n".join(lines[1:]).strip()
+        else:
+            brief_content = saved
 
-    if gen_btn:
-        with st.spinner("Claude 正在分析市场数据，请稍候…"):
-            result = ai_brief.generate_morning_brief(extra_focus=extra)
-            st.session_state.brief_content = result
-            st.session_state.brief_time = datetime.now().strftime("%H:%M:%S")
+    # 今日早报不存在且已过 08:00 SGT → 自动生成
+    if not brief_content and now_sgt.hour >= 8:
+        with st.spinner("Claude 正在分析今日市场数据，生成早报…"):
+            brief_content = ai_brief.generate_morning_brief()
+            brief_time = now_sgt.strftime("%H:%M SGT")
+            with open(brief_path, "w", encoding="utf-8") as f:
+                f.write(f"<!-- generated: {brief_time} -->\n{brief_content}")
 
-    if st.session_state.brief_content:
-        open_panel("今日简报")
-        st.caption(f"生成时间：{st.session_state.brief_time}")
-        st.markdown(st.session_state.brief_content)
+    if brief_content:
+        open_panel(f"今日早报 · {today_str}")
+        if brief_time:
+            st.caption(f"生成时间：{brief_time}")
+        st.markdown(brief_content)
         st.download_button(
             label="📥 下载早报（txt）",
-            data=st.session_state.brief_content,
-            file_name=f"早报_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            data=brief_content,
+            file_name=f"早报_{today_str}.txt",
             mime="text/plain",
         )
         close_panel()
     else:
-        open_panel("功能说明")
-        st.info("点击「生成早报」按钮，Claude 将根据当前市场数据自动生成分析报告。")
-        st.markdown("""
-**早报包含：**
-- 🇺🇸 隔夜美股三大指数表现与热门个股点评
-- 🛢️ 大宗商品（黄金、原油、铜）动态分析
-- 🇨🇳 今日 A 股开盘方向展望
-- 📌 今日重点关注事件与风险提示
-""")
+        open_panel("今日早报")
+        st.info(f"今日早报将在 **08:00 SGT** 自动生成。\n\n当前新加坡时间：{now_sgt.strftime('%H:%M')}")
         close_panel()
 
     open_panel("🔍 单标的快速分析")
