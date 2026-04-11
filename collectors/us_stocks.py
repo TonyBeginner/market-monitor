@@ -39,19 +39,28 @@ def get_quote(symbols: list[str]) -> pd.DataFrame:
             if hist.empty or len(hist) < 1:
                 continue
 
-            close_today = float(hist["Close"].iloc[-1])
-            close_prev  = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else close_today
+            raw_today = hist["Close"].iloc[-1]
+            raw_prev  = hist["Close"].iloc[-2] if len(hist) >= 2 else raw_today
+
+            # 跳过 NaN / None 值
+            import pandas as pd
+            if pd.isna(raw_today) or pd.isna(raw_prev):
+                continue
+
+            close_today = float(raw_today)
+            close_prev  = float(raw_prev)
             change      = close_today - close_prev
             change_pct  = (change / close_prev * 100) if close_prev else 0
 
+            mkt_cap = getattr(info, "market_cap", None)
             rows.append({
                 "代码":     sym,
                 "名称":     INDEX_NAMES.get(sym, sym),
                 "现价":     round(close_today, 2),
                 "涨跌额":   round(change, 2),
                 "涨跌幅%":  round(change_pct, 2),
-                "成交量":   getattr(info, "three_month_average_volume", 0),
-                "市值(亿)": round(getattr(info, "market_cap", 0) / 1e8, 1),
+                "成交量":   getattr(info, "three_month_average_volume", 0) or 0,
+                "市值(亿)": round(mkt_cap / 1e8, 1) if mkt_cap else 0,
                 "更新时间": datetime.now().strftime("%H:%M:%S"),
             })
         except Exception as e:
