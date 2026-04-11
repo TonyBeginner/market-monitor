@@ -163,8 +163,8 @@ def render_kline(df: pd.DataFrame, title: str):
         paper_bgcolor="white",
         plot_bgcolor="#F8F9FA",
     )
-    fig.update_xaxis(gridcolor="#E0E0E0")
-    fig.update_yaxis(gridcolor="#E0E0E0")
+    fig.update_xaxes(gridcolor="#E0E0E0")
+    fig.update_yaxes(gridcolor="#E0E0E0")
 
     st.plotly_chart(fig, use_container_width=True)
 
