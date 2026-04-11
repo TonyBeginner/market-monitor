@@ -535,34 +535,41 @@ def render_hero(title: str, text: str, kicker: str = "Market Monitor"):
 
 
 def render_status_strip(cards: list[dict]):
-    html = ['<div class="status-strip">']
-    for card in cards:
-        html.append(
-            f"""
-            <div class="status-card">
-                <div class="status-label">{card['label']}</div>
-                <div class="status-value">{card['value']}</div>
-                <div class="status-note">{card['note']}</div>
-            </div>
-            """
-        )
-    html.append("</div>")
-    st.markdown("".join(html), unsafe_allow_html=True)
+    if not cards:
+        return
+    cols = st.columns(len(cards))
+    for col, card in zip(cols, cards):
+        with col:
+            st.markdown(
+                f"""
+                <div class="status-card">
+                    <div class="status-label">{html_lib.escape(str(card['label']))}</div>
+                    <div class="status-value">{html_lib.escape(str(card['value']))}</div>
+                    <div class="status-note">{html_lib.escape(str(card['note']))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def render_micro_status(items: list[dict]):
-    html = ['<div class="micro-strip">']
-    for item in items:
-        html.append(
-            f"""
-            <div class="micro-pill">
-                <span class="micro-dot" style="background:{item['color']};"></span>
-                <span>{item['label']}：{item['value']}</span>
-            </div>
-            """
-        )
-    html.append("</div>")
-    st.markdown("".join(html), unsafe_allow_html=True)
+    if not items:
+        return
+    cols = st.columns(len(items))
+    for col, item in zip(cols, items):
+        with col:
+            color = html_lib.escape(str(item['color']))
+            label = html_lib.escape(str(item['label']))
+            value = html_lib.escape(str(item['value']))
+            st.markdown(
+                f"""
+                <div class="micro-pill">
+                    <span class="micro-dot" style="background:{color};"></span>
+                    <span>{label}：{value}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def render_news_cards(df: pd.DataFrame):
