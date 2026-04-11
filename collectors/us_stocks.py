@@ -1,14 +1,14 @@
 """
 美股数据采集模块 - 使用 yfinance（免费，无需 API Key）
 """
-import yfinance as yf
-import pandas as pd
 from datetime import datetime
 
+import pandas as pd
+import yfinance as yf
 
-# 默认监控列表
+
 DEFAULT_US_STOCKS = {
-    "指数": ["^GSPC", "^IXIC", "^DJI"],          # 标普500、纳斯达克、道琼斯
+    "指数": ["^GSPC", "^IXIC", "^DJI"],
     "科技": ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA"],
     "中概": ["BABA", "PDD", "JD", "BIDU"],
 }
@@ -16,14 +16,20 @@ DEFAULT_US_STOCKS = {
 INDEX_NAMES = {
     "^GSPC": "标普500",
     "^IXIC": "纳斯达克",
-    "^DJI":  "道琼斯",
+    "^DJI": "道琼斯",
 }
+
+
+def _get_fast_info_value(info, key: str, default=None):
+    if isinstance(info, dict):
+        return info.get(key, default)
+    return getattr(info, key, default)
 
 
 def get_quote(symbols: list[str]) -> pd.DataFrame:
     """
-    批量获取实时报价（延迟约15分钟）
-    返回 DataFrame，列：symbol, name, price, change, change_pct, volume, market_cap
+    批量获取实时报价（通常为延迟行情）
+    返回列：代码、名称、现价、涨跌额、涨跌幅、成交量、市值(亿)、更新时间
     """
     if not symbols:
         return pd.DataFrame()
@@ -33,36 +39,44 @@ def get_quote(symbols: list[str]) -> pd.DataFrame:
 
     for sym in symbols:
         try:
-            info = tickers.tickers[sym].fast_info
-            hist = tickers.tickers[sym].history(period="2d", interval="1d")
+            ticker = tickers.tickers.get(sym) or yf.Ticker(sym)
+            hist = ticker.history(period="2d", interval="1d")
 
-            if hist.empty or len(hist) < 1:
+            if hist.empty:
                 continue
 
             raw_today = hist["Close"].iloc[-1]
-            raw_prev  = hist["Close"].iloc[-2] if len(hist) >= 2 else raw_today
+            raw_prev = hist["Close"].iloc[-2] if len(hist) >= 2 else raw_today
 
-            # 跳过 NaN / None 值
-            import pandas as pd
             if pd.isna(raw_today) or pd.isna(raw_prev):
                 continue
 
             close_today = float(raw_today)
-            close_prev  = float(raw_prev)
-            change      = close_today - close_prev
-            change_pct  = (change / close_prev * 100) if close_prev else 0
+            close_prev = float(raw_prev)
+            change = close_today - close_prev
+            change_pct = (change / close_prev * 100) if close_prev else 0
 
-            mkt_cap = getattr(info, "market_cap", None)
-            rows.append({
-                "代码":     sym,
-                "名称":     INDEX_NAMES.get(sym, sym),
-                "现价":     round(close_today, 2),
-                "涨跌额":   round(change, 2),
-                "涨跌幅%":  round(change_pct, 2),
-                "成交量":   getattr(info, "three_month_average_volume", 0) or 0,
-                "市值(亿)": round(mkt_cap / 1e8, 1) if mkt_cap else 0,
-                "更新时间": datetime.now().strftime("%H:%M:%S"),
-            })
+            try:
+                info = ticker.fast_info or {}
+            except Exception:
+                info = {}
+
+            market_cap = _get_fast_info_value(info, "market_cap")
+            avg_volume = _get_fast_info_value(info, "three_month_average_volume", 0) or 0
+
+            rows.append(
+                {
+                    "代码": sym,
+                    "名称": INDEX_NAMES.get(sym, sym),
+                    "现价": round(close_today, 2),
+                    "涨跌额": round(change, 2),
+                    "涨跌幅%": round(change_pct, 2),
+                    "涨跌幅": round(change_pct, 2),
+                    "成交量": avg_volume,
+                    "市值(亿)": round(market_cap / 1e8, 1) if market_cap else 0,
+                    "更新时间": datetime.now().strftime("%H:%M:%S"),
+                }
+            )
         except Exception as e:
             print(f"[US] {sym} 获取失败: {e}")
 

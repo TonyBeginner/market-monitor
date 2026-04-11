@@ -19,9 +19,11 @@ CLAUDE_API_KEY = _get_secret("CLAUDE_API_KEY")
 
 # ─── Tushare Pro Token ───────────────────────────────────────────
 TUSHARE_TOKEN = _get_secret("TUSHARE_TOKEN")
+TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = _get_secret("TELEGRAM_CHAT_ID")
 
 # ─── 刷新间隔（秒）──────────────────────────────────────────────
-REFRESH_INTERVAL = 300   # 默认5分钟刷新一次
+REFRESH_INTERVAL = 30   # 默认30秒刷新一次
 
 # ─── 自选股列表（美股）──────────────────────────────────────────
 # 直接填 Yahoo Finance 代码即可

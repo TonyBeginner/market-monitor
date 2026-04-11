@@ -63,14 +63,14 @@ def get_intl_futures_quote(categories: list = None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_futures_history(symbol: str, period: str = "3mo") -> pd.DataFrame:
+def get_futures_history(symbol: str, period: str = "3mo", interval: str = "1d") -> pd.DataFrame:
     """
     获取期货历史价格数据
     symbol: 如 GC=F (黄金), CL=F (原油)
     """
     try:
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval="1d")
+        df = ticker.history(period=period, interval=interval)
         df.index = pd.to_datetime(df.index)
         df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
         df.columns = ["open", "high", "low", "close", "volume"]

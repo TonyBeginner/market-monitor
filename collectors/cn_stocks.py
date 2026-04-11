@@ -45,8 +45,7 @@ def init_tushare(token: str):
     if not TUSHARE_AVAILABLE:
         return False
     try:
-        ts.set_token(token)
-        _pro = ts.pro_api()
+        _pro = ts.pro_api(token=token)
         # 简单测试连通性
         _pro.trade_cal(exchange="SSE", start_date="20240101", end_date="20240102")
         return True
