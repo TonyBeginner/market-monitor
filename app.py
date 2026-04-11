@@ -444,14 +444,16 @@ def load_global_market_snapshot():
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_telegram_hotspots():
-    bot_token = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
-    chat_id   = getattr(config, "TELEGRAM_CHAT_ID",   "") or ""
-    api_key   = getattr(config, "CLAUDE_API_KEY",     "") or ""
+    bot_token  = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
+    chat_id    = getattr(config, "TELEGRAM_CHAT_ID",   "") or ""
+    claude_key = getattr(config, "CLAUDE_API_KEY",     "") or ""
+    groq_key   = getattr(config, "GROQ_API_KEY",       "") or ""
     return telegram_feed.get_recent_messages(
         bot_token,
         chat_id,
         limit=5,
-        claude_api_key=api_key,
+        claude_api_key=claude_key,
+        groq_api_key=groq_key,
     )
 
 

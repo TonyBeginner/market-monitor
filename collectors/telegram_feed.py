@@ -26,9 +26,9 @@ def _is_chinese(text: str) -> bool:
     return han_count / len(text) > 0.3
 
 
-def _translate_to_chinese(texts: list[str], api_key: str) -> list[str]:
+def _translate_to_chinese(texts: list[str], api_key: str, groq_key: str = "") -> list[str]:
     """批量翻译为中文，已是中文的直接返回，用缓存避免重复调用。"""
-    if not api_key:
+    if not api_key and not groq_key:
         return texts
 
     results: list[str] = []
@@ -47,9 +47,7 @@ def _translate_to_chinese(texts: list[str], api_key: str) -> list[str]:
         return results
 
     try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=api_key)
+        from utils.ai_client import chat
 
         numbered = "\n\n".join(
             f"[{idx + 1}]\n{text}" for idx, (_, text) in enumerate(to_translate)
@@ -60,12 +58,7 @@ def _translate_to_chinese(texts: list[str], api_key: str) -> list[str]:
             + numbered
         )
 
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
+        raw = chat(prompt, api_key_groq=groq_key, api_key_claude=api_key, max_tokens=1024)
 
         # 解析返回的 [1] 译文... [2] 译文...
         import re
@@ -94,6 +87,7 @@ def get_recent_messages(
     chat_id: str,
     limit: int = 8,
     claude_api_key: str = "",
+    groq_api_key: str = "",
 ) -> pd.DataFrame:
     """Fetch recent Telegram messages for one chat/channel via Bot API."""
     if not bot_token or not chat_id:
@@ -146,10 +140,10 @@ def get_recent_messages(
 
     df = pd.DataFrame(rows)
 
-    # 翻译标题和内容
-    if claude_api_key:
-        titles = _translate_to_chinese(df["标题"].tolist(), claude_api_key)
-        bodies = _translate_to_chinese(df["内容"].tolist(), claude_api_key)
+    # 翻译标题和内容（优先 Groq，其次 Claude）
+    if groq_api_key or claude_api_key:
+        titles = _translate_to_chinese(df["标题"].tolist(), claude_api_key, groq_api_key)
+        bodies = _translate_to_chinese(df["内容"].tolist(), claude_api_key, groq_api_key)
         df["标题"] = titles
         df["内容"] = bodies
 

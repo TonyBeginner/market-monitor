@@ -25,6 +25,9 @@ def _get_secret(key: str, fallback: str = "") -> str:
 # ─── Claude API Key ──────────────────────────────────────────────
 CLAUDE_API_KEY = _get_secret("CLAUDE_API_KEY")
 
+# ─── Groq API Key（免费，优先使用）──────────────────────────────
+GROQ_API_KEY = _get_secret("GROQ_API_KEY")
+
 # ─── GitHub Token（用于持久化存储每日早报）────────────────────────
 GITHUB_TOKEN = _get_secret("GITHUB_TOKEN")
 
