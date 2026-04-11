@@ -31,12 +31,13 @@ DEFAULT_CN_STOCKS = {
     ],
     "科技": [
         ("002594.SZ", "比亚迪"),
-        ("600测.SH", "宁德时代"),  # 占位示例
+        ("300750.SZ", "宁德时代"),
         ("688111.SH", "金山办公"),
     ],
 }
 
 _pro = None
+_last_error = None
 
 
 def init_tushare(token: str):
@@ -91,7 +92,12 @@ def get_index_quote(token: str = None) -> pd.DataFrame:
         return pd.DataFrame(rows)
 
     except Exception as e:
+        import traceback
         print(f"[CN] 指数行情获取失败: {e}")
+        print(traceback.format_exc())
+        # 将错误存入全局变量，方便 app.py 展示
+        global _last_error
+        _last_error = str(e)
         return _get_mock_index_data()
 
 
@@ -183,21 +189,31 @@ def get_history(ts_code: str, start: str = None, end: str = None) -> pd.DataFram
 
 
 def get_northbound_flow() -> dict:
-    """获取北向资金今日净流入（单位：亿元）"""
+    """获取北向资金最近交易日净流入（单位：亿元）"""
     if not TUSHARE_AVAILABLE or _pro is None:
-        return {"north_money": None, "south_money": None}
+        return {"north_money": None, "south_money": None, "trade_date": None, "error": "Tushare 未初始化"}
     try:
-        today = date.today().strftime("%Y%m%d")
-        df = _pro.moneyflow_hsgt(trade_date=today)
+        # 查近 10 天，取最新一条，兼容周末/节假日
+        end = date.today().strftime("%Y%m%d")
+        from datetime import timedelta
+        start = (date.today() - timedelta(days=10)).strftime("%Y%m%d")
+        df = _pro.moneyflow_hsgt(start_date=start, end_date=end)
         if df is None or df.empty:
-            return {"north_money": None, "south_money": None}
+            return {"north_money": None, "south_money": None, "trade_date": None, "error": "API 返回空数据"}
+        # 取最近一个交易日
+        df = df.sort_values("trade_date", ascending=False)
         row = df.iloc[0]
         return {
-            "north_money": round(row.get("north_money", 0) / 1e4, 2),  # 转亿元
-            "south_money": round(row.get("south_money", 0) / 1e4, 2),
+            "north_money": round(float(row.get("north_money") or 0) / 1e4, 2),
+            "south_money": round(float(row.get("south_money") or 0) / 1e4, 2),
+            "trade_date": str(row.get("trade_date", "")),
+            "error": None,
         }
-    except Exception:
-        return {"north_money": None, "south_money": None}
+    except Exception as e:
+        import traceback
+        print(f"[CN] 北向资金获取失败: {e}")
+        print(traceback.format_exc())
+        return {"north_money": None, "south_money": None, "trade_date": None, "error": str(e)}
 
 
 def _get_mock_index_data() -> pd.DataFrame:

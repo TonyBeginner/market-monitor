@@ -288,10 +288,80 @@ st.markdown("""
         border: 1px solid var(--line) !important;
         color: #dce7f7 !important;
     }
-    .stTextInput input, .stNumberInput input, .stSelectbox [data-baseweb="select"] > div {
+    /* ── 输入控件：文字框 / 数字框 / 下拉框 ── */
+    .stTextInput input,
+    .stNumberInput input,
+    .stSelectbox [data-baseweb="select"] > div,
+    .stSelectbox [data-baseweb="select"] {
         background: #0c1728 !important;
         color: #eaf2ff !important;
-        border-color: rgba(110,170,255,0.14) !important;
+        border-color: rgba(110,170,255,0.18) !important;
+    }
+    /* 下拉框已选值文字 */
+    .stSelectbox [data-baseweb="select"] span,
+    .stSelectbox [data-baseweb="select"] div {
+        color: #eaf2ff !important;
+    }
+    /* 下拉弹出层（选项列表） */
+    [data-baseweb="popover"],
+    [data-baseweb="menu"],
+    [role="listbox"] {
+        background: #0e1e33 !important;
+        border: 1px solid rgba(110,170,255,0.18) !important;
+        border-radius: 10px !important;
+    }
+    [role="option"],
+    [data-baseweb="menu"] li {
+        background: transparent !important;
+        color: #c8d8ea !important;
+    }
+    [role="option"]:hover,
+    [data-baseweb="menu"] li:hover {
+        background: rgba(73,198,255,0.10) !important;
+        color: #ffffff !important;
+    }
+    [aria-selected="true"][role="option"] {
+        background: rgba(73,198,255,0.15) !important;
+        color: #7bc7ff !important;
+    }
+    /* 所有控件上方的 label */
+    .stSelectbox label,
+    .stTextInput label,
+    .stNumberInput label,
+    .stRadio label,
+    .stCheckbox label,
+    .stSlider label,
+    .stMultiSelect label {
+        color: #8ea3bd !important;
+        font-size: 0.82rem !important;
+    }
+    /* radio 选项文字 */
+    .stRadio [data-testid="stMarkdownContainer"] p,
+    .stRadio div[role="radiogroup"] label {
+        color: #c8d8ea !important;
+    }
+    /* expander 标题 */
+    .streamlit-expanderHeader {
+        color: #c8d8ea !important;
+        background: rgba(10,16,28,0.6) !important;
+    }
+    /* metric 标签和值 */
+    [data-testid="stMetricLabel"] {
+        color: #8ea3bd !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: #eaf2ff !important;
+    }
+    [data-testid="stMetricDelta"] {
+        color: #8ea3bd !important;
+    }
+    /* spinner 文字 */
+    .stSpinner > div {
+        color: #8ea3bd !important;
+    }
+    /* subheader */
+    h3 {
+        color: #dfe9f8 !important;
     }
     .stMarkdown, .stCaption, .stText {
         color: inherit;
@@ -353,15 +423,25 @@ st.markdown("""
 
 # ─── 初始化 Tushare ───────────────────────────────────────────────
 @st.cache_resource
-@st.cache_resource
-def init_tushare():
+def _create_tushare_pro():
+    """缓存 pro 对象本身，而非初始化的副作用。"""
     token = getattr(config, "TUSHARE_TOKEN", "") or ""
-    if token:
-        return cn_stocks.init_tushare(token)
-    return False
+    if not token:
+        return None
+    try:
+        import tushare as ts
+        pro = ts.pro_api(token=token)
+        pro.trade_cal(exchange="SSE", start_date="20240101", end_date="20240102")
+        return pro
+    except Exception as e:
+        print(f"[CN] Tushare 初始化失败: {e}")
+        return None
 
 
-tushare_ok = init_tushare()
+# 每次 rerun 都把缓存的 pro 对象注入 cn_stocks 模块
+_cached_pro = _create_tushare_pro()
+cn_stocks._pro = _cached_pro
+tushare_ok = _cached_pro is not None
 
 
 # ─── 缓存数据获取（TTL=5分钟）────────────────────────────────────
@@ -375,11 +455,12 @@ def load_us_index():
     return us_stocks.get_quote(syms)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
-def load_cn_index():
+def load_cn_index(_tushare_ready: bool = False):
+    # _tushare_ready 作为 cache key 的一部分，确保 tushare 初始化后不复用旧缓存
     return cn_stocks.get_index_quote()
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
-def load_cn_stocks():
+def load_cn_stocks(_tushare_ready: bool = False):
     return cn_stocks.get_stock_quote(config.MY_CN_WATCHLIST)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
@@ -499,7 +580,7 @@ def format_refresh_interval(seconds: int) -> str:
 
 
 def style_table(df, pct_col="涨跌幅%"):
-    """对 DataFrame 应用样式"""
+    """对 DataFrame 应用样式（保留兼容性）"""
     if df.empty:
         return df
     if pct_col not in df.columns:
@@ -511,6 +592,92 @@ def style_table(df, pct_col="涨跌幅%"):
                      .format({pct_col: format_pct}) \
                      .set_properties(**{"font-size": "13px"})
     return styled
+
+
+def render_table(df: pd.DataFrame, pct_col: str = "涨跌幅%", price_col: str = "现价"):
+    """用自定义 HTML 渲染行情表格，替代原生 st.dataframe。"""
+    if df is None or df.empty:
+        st.info("暂无数据")
+        return
+
+    # 找到实际的涨跌幅列
+    actual_pct = next((c for c in [pct_col, "涨跌幅%", "涨跌幅"] if c in df.columns), None)
+
+    header_cells = "".join(f'<th>{html_lib.escape(str(c))}</th>' for c in df.columns)
+
+    rows_html = ""
+    for _, row in df.iterrows():
+        cells = ""
+        for col in df.columns:
+            val = row[col]
+            cell_style = ""
+            display = html_lib.escape(str(val))
+
+            if col == actual_pct:
+                try:
+                    v = float(val)
+                    if v > 0:
+                        cell_style = "color:#38f28b;font-weight:600;"
+                        display = f"+{v:.2f}%"
+                    elif v < 0:
+                        cell_style = "color:#ff6257;font-weight:600;"
+                        display = f"{v:.2f}%"
+                    else:
+                        cell_style = "color:#8ea3bd;"
+                        display = f"{v:.2f}%"
+                except Exception:
+                    pass
+            elif col == price_col or col == "现价":
+                cell_style = "color:#eaf2ff;font-weight:600;font-variant-numeric:tabular-nums;"
+            elif col in ("涨跌额",):
+                try:
+                    v = float(val)
+                    cell_style = "color:#38f28b;" if v > 0 else ("color:#ff6257;" if v < 0 else "color:#8ea3bd;")
+                    display = f"+{v:.2f}" if v > 0 else f"{v:.2f}"
+                except Exception:
+                    pass
+
+            cells += f'<td style="{cell_style}">{display}</td>'
+        rows_html += f"<tr>{cells}</tr>"
+
+    st.markdown(f"""
+    <div style="overflow-x:auto;border-radius:12px;border:1px solid rgba(110,170,255,0.12);background:rgba(10,16,28,0.7);">
+    <table style="width:100%;border-collapse:collapse;font-size:0.88rem;color:#c8d8ea;">
+        <thead>
+            <tr style="border-bottom:1px solid rgba(110,170,255,0.18);background:rgba(73,198,255,0.05);">
+                {header_cells}
+            </tr>
+        </thead>
+        <tbody>
+            {rows_html}
+        </tbody>
+    </table>
+    </div>
+    <style>
+    table td, table th {{
+        padding: 0.6rem 1rem;
+        text-align: left;
+        white-space: nowrap;
+    }}
+    table th {{
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: #5a7a9a;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }}
+    table tbody tr {{
+        border-bottom: 1px solid rgba(110,170,255,0.06);
+        transition: background 0.15s;
+    }}
+    table tbody tr:hover {{
+        background: rgba(73,198,255,0.05);
+    }}
+    table tbody tr:last-child {{
+        border-bottom: none;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def get_pct_col(df: pd.DataFrame, preferred: str = "涨跌幅%") -> str | None:
@@ -941,8 +1108,10 @@ def render_kline(df: pd.DataFrame, title: str):
         margin=dict(l=10, r=10, t=55, b=10),
         legend=dict(
             orientation="h", x=0, y=1.02,
-            font=dict(size=11),
+            font=dict(size=11, color="#dfe9f8"),
             bgcolor="rgba(10,16,28,0.72)",
+            bordercolor="rgba(110,170,255,0.2)",
+            borderwidth=1,
         ),
         paper_bgcolor="rgba(6,9,14,0.96)",
         plot_bgcolor="#07111b",
@@ -1074,7 +1243,7 @@ if page == "🏠 市场总览":
     with st.spinner("加载美股指数…"):
         us_idx = load_us_index()
     with st.spinner("加载A股指数…"):
-        cn_idx = load_cn_index()
+        cn_idx = load_cn_index(_tushare_ready=tushare_ok)
     with st.spinner("加载期货数据…"):
         fut_df = load_futures()
     with st.spinner("加载自选股…"):
@@ -1099,7 +1268,16 @@ if page == "🏠 市场总览":
         close_panel()
 
         open_panel("🇨🇳 A股风向")
-        render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3)
+        if cn_idx is not None and not cn_idx.empty and cn_idx["现价"].iloc[0] != "—":
+            render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3)
+        else:
+            err = getattr(cn_stocks, "_last_error", None)
+            if err:
+                st.warning(f"A股数据获取失败：{err}")
+            elif not tushare_ok:
+                st.info("Tushare 未初始化，请确认 Token 配置正确后刷新页面。")
+            else:
+                render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3)
         close_panel()
 
         open_panel("📦 大宗商品与风险偏好")
@@ -1114,12 +1292,7 @@ if page == "🏠 市场总览":
     if not us_df.empty:
         display_cols = ["名称", "现价", "涨跌额", "涨跌幅%", "更新时间"]
         available = [c for c in display_cols if c in us_df.columns]
-        st.dataframe(
-            style_table(us_df[available]),
-            width='stretch',
-            hide_index=True,
-            height=340,
-        )
+        render_table(us_df[available])
     else:
         st.info("当前未获取到美股自选数据")
     close_panel()
@@ -1254,14 +1427,14 @@ elif page == "🇺🇸 美股":
             with col1:
                 st.subheader("🔴 涨幅榜 Top 5")
                 top5 = us_df.nlargest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
-                st.dataframe(style_table(top5), hide_index=True, width='stretch')
+                render_table(top5)
             with col2:
                 st.subheader("🟢 跌幅榜 Top 5")
                 bot5 = us_df.nsmallest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
-                st.dataframe(style_table(bot5), hide_index=True, width='stretch')
+                render_table(bot5)
             close_panel()
             open_panel("全部自选股")
-            st.dataframe(style_table(us_df), width='stretch', hide_index=True)
+            render_table(us_df)
             close_panel()
 
     with tab2:
@@ -1308,35 +1481,76 @@ elif page == "🇨🇳 A股":
         st.warning("请先在 config.py 中配置 Tushare Token，然后重启应用。")
         st.stop()
 
-    open_panel("北向与南向资金")
+    open_panel("🔀 北向与南向资金")
     flow = cn_stocks.get_northbound_flow()
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    flow_err = flow.get("error")
+    if flow_err:
+        st.warning(f"⚠️ 北向资金数据获取失败：{flow_err}")
+    else:
+        trade_date = flow.get("trade_date") or ""
+        date_label = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}" if len(trade_date) == 8 else "—"
         nm = flow.get("north_money")
-        st.metric("北向资金净流入(亿)", f"{nm:+.2f}" if nm is not None else "暂无")
-    with c2:
         sm = flow.get("south_money")
-        st.metric("南向资金净流入(亿)", f"{sm:+.2f}" if sm is not None else "暂无")
-    with c3:
-        st.metric("更新时间", datetime.now().strftime("%H:%M:%S"))
+
+        def _flow_card(title, value, date_str):
+            if value is None:
+                color, sign, val_str = "#8ea3bd", "", "暂无"
+            elif value >= 0:
+                color, sign, val_str = "#38f28b", "+", f"{value:.2f}"
+            else:
+                color, sign, val_str = "#ff6257", "", f"{value:.2f}"
+            return f"""
+            <div style="
+                background: rgba(10,16,28,0.88);
+                border: 1px solid rgba(110,170,255,0.14);
+                border-left: 3px solid {color};
+                border-radius: 14px;
+                padding: 1.1rem 1.4rem;
+                display: flex; flex-direction: column; gap: 0.35rem;
+            ">
+                <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">{title}</div>
+                <div style="font-size:2rem;font-weight:700;color:{color};letter-spacing:-0.01em;">{sign}{val_str} <span style="font-size:1rem;font-weight:400;">亿</span></div>
+                <div style="font-size:0.75rem;color:#5a7a9a;">数据日期：{date_str}</div>
+            </div>"""
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown(_flow_card("北向资金净流入", nm, date_label), unsafe_allow_html=True)
+        with c2:
+            st.markdown(_flow_card("南向资金净流入", sm, date_label), unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"""
+            <div style="
+                background: rgba(10,16,28,0.88);
+                border: 1px solid rgba(110,170,255,0.14);
+                border-left: 3px solid rgba(110,170,255,0.4);
+                border-radius: 14px;
+                padding: 1.1rem 1.4rem;
+                display: flex; flex-direction: column; gap: 0.35rem;
+            ">
+                <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">查询时间</div>
+                <div style="font-size:2rem;font-weight:700;color:#7bc7ff;">{datetime.now().strftime("%H:%M:%S")}</div>
+                <div style="font-size:0.75rem;color:#5a7a9a;">最近交易日数据</div>
+            </div>""", unsafe_allow_html=True)
     close_panel()
 
     open_panel("📊 主要指数")
     with st.spinner("加载指数…"):
-        cn_idx = load_cn_index()
+        cn_idx = load_cn_index(_tushare_ready=tushare_ok)
+    err = getattr(cn_stocks, "_last_error", None)
+    if err:
+        st.warning(f"⚠️ 指数数据获取失败：{err}")
     if not cn_idx.empty:
         cols_show = [c for c in ["名称", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_idx.columns]
-        st.dataframe(style_table(cn_idx[cols_show], pct_col="涨跌幅%"),
-                     width='stretch', hide_index=True)
+        render_table(cn_idx[cols_show])
     close_panel()
 
     open_panel("⭐ 自选股")
     with st.spinner("加载自选股…"):
-        cn_df = load_cn_stocks()
+        cn_df = load_cn_stocks(_tushare_ready=tushare_ok)
     if not cn_df.empty:
         cols_show = [c for c in ["名称", "代码", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_df.columns]
-        st.dataframe(style_table(cn_df[cols_show], pct_col="涨跌幅%"),
-                     width='stretch', hide_index=True)
+        render_table(cn_df[cols_show])
     close_panel()
 
 
@@ -1362,11 +1576,7 @@ elif page == "📦 期货":
             sub = fut_df[fut_df["分类"] == cat].copy()
             cols_show = ["品种", "现价", "涨跌额", "涨跌幅%", "更新时间"]
             available = [c for c in cols_show if c in sub.columns]
-            st.dataframe(
-                style_table(sub[available]),
-                width='stretch',
-                hide_index=True,
-            )
+            render_table(sub[available], price_col="现价")
             close_panel()
 
         # 期货涨跌条形图
@@ -1438,7 +1648,7 @@ elif page == "📊 K线图表":
 
     if not hist.empty:
         with st.expander("查看原始数据"):
-            st.dataframe(hist.tail(30), width='stretch')
+            render_table(hist.tail(30).reset_index(), pct_col="")
     close_panel()
 
 
