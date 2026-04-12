@@ -422,10 +422,11 @@ st.markdown("""
     }
     .news-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 0.85rem;
         margin-top: 0.35rem;
         margin-bottom: 0.3rem;
+        align-items: stretch;
     }
     .news-card {
         background: linear-gradient(180deg, rgba(12, 19, 31, 0.98), rgba(8, 12, 20, 0.96));
@@ -434,6 +435,9 @@ st.markdown("""
         padding: 0.95rem 1rem;
         box-shadow: 0 10px 22px rgba(0, 0, 0, 0.24);
         min-height: 140px;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
     }
     .news-meta {
         display: flex;
@@ -463,6 +467,7 @@ st.markdown("""
         color: #9fb2c8;
         font-size: 0.9rem;
         line-height: 1.5;
+        flex: 1;
     }
     .news-empty {
         padding: 0.9rem 1rem;
@@ -470,6 +475,16 @@ st.markdown("""
         border-radius: 14px;
         color: var(--muted);
         background: rgba(9, 14, 22, 0.72);
+    }
+    @media (max-width: 1100px) {
+        .news-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+    @media (max-width: 700px) {
+        .news-grid {
+            grid-template-columns: 1fr;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -1762,31 +1777,33 @@ def render_news_cards(df: pd.DataFrame):
         )
         return
 
-    rows_list = list(df.iterrows())
-    n = len(rows_list)
-    n_cols = min(n, 3)
-    cols = st.columns(n_cols)
-
-    for i, (_, row) in enumerate(rows_list):
-        title = html_lib.escape(str(row.get("标题", "未命名消息")))
-        body = html_lib.escape(str(row.get("内容", ""))).replace("\n", "<br>")
-        source = html_lib.escape(str(row.get("来源", "Telegram")))
-        date_str = html_lib.escape(str(row.get("日期", "")))
-        time_str = html_lib.escape(str(row.get("时间", "")))
-        with cols[i % n_cols]:
-            st.markdown(
-                f"""
-                <div class="news-card">
-                    <div class="news-meta">
-                        <span class="news-source">{source}</span>
-                        <span class="news-time">{date_str} {time_str}</span>
+    records = list(df.to_dict(orient="records"))
+    for start in range(0, len(records), 3):
+        row_items = records[start:start + 3]
+        cols = st.columns(3)
+        for idx, col in enumerate(cols):
+            if idx >= len(row_items):
+                continue
+            row = row_items[idx]
+            title = html_lib.escape(str(row.get("标题", "未命名消息")))
+            body = html_lib.escape(str(row.get("内容", ""))).replace("\n", "<br>")
+            source = html_lib.escape(str(row.get("来源", "Telegram")))
+            date_str = html_lib.escape(str(row.get("日期", "")))
+            time_str = html_lib.escape(str(row.get("时间", "")))
+            with col:
+                st.markdown(
+                    f"""
+                    <div class="news-card">
+                        <div class="news-meta">
+                            <span class="news-source">{source}</span>
+                            <span class="news-time">{date_str} {time_str}</span>
+                        </div>
+                        <div class="news-title">{title}</div>
+                        <div class="news-body">{body}</div>
                     </div>
-                    <div class="news-title">{title}</div>
-                    <div class="news-body">{body}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 
 @get_fragment_decorator(run_every=config.REFRESH_INTERVAL)
