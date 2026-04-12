@@ -14,6 +14,7 @@ from urllib.parse import quote
 import time
 import sys
 import os
+import shutil
 
 # 确保模块路径正确
 sys.path.insert(0, os.path.dirname(__file__))
@@ -23,6 +24,31 @@ from collectors import us_stocks, cn_stocks, futures, telegram_feed
 from agents import morning_brief as ai_brief
 from utils import ai_client, github_store, disk_cache
 from utils import watchlist_store
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
+
+
+@st.cache_resource
+def backup_watchlists_on_startup() -> str:
+    src = os.path.join(os.path.dirname(__file__), ".watchlists.json")
+    if not os.path.exists(src):
+        return ""
+    backup_dir = os.path.join(os.path.dirname(__file__), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dst = os.path.join(backup_dir, f".watchlists_{timestamp}.json")
+    try:
+        shutil.copy2(src, dst)
+        return dst
+    except Exception as e:
+        print(f"[Backup] 启动备份失败: {e}")
+        return ""
+
+
+backup_watchlists_on_startup()
 
 # ─── 页面配置 ─────────────────────────────────────────────────────
 st.set_page_config(
@@ -1402,6 +1428,11 @@ def get_fragment_decorator(run_every: int | None = None):
             return func
         return passthrough
     return fragment_api(run_every=run_every)
+
+
+def ensure_page_autorefresh():
+    if st_autorefresh is not None:
+        st_autorefresh(interval=max(int(config.REFRESH_INTERVAL), 30) * 1000, key="global_page_autorefresh")
 
 
 # ─── 工具函数 ─────────────────────────────────────────────────────
@@ -3127,6 +3158,8 @@ with st.sidebar:
 
     st.caption(f"自动刷新间隔：{format_refresh_interval(config.REFRESH_INTERVAL)}")
 
+
+ensure_page_autorefresh()
 
 # ── 注入 JS：隐藏所有 __t 开头的触发按钮 ────────────────────────
 import streamlit.components.v1 as _components
