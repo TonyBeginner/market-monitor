@@ -1019,6 +1019,15 @@ def get_position_quote_row(position: dict) -> dict:
     return row
 
 
+POSITION_FRAME_COLUMNS = [
+    "index", "市场", "代码", "名称", "持仓数量", "持仓成本", "现价", "涨跌", "涨跌%",
+    "成交量", "RSI", "持仓市值", "浮盈亏", "浮盈亏%", "计价货币",
+    "持仓成本USD", "持仓市值USD", "浮盈亏USD",
+    "今日", "一周", "一个月", "今年至今", "全年", "下一财报",
+    "asset_symbol", "asset_name", "asset_type",
+]
+
+
 def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
     rows = []
     for idx, position in enumerate(positions):
@@ -1085,7 +1094,7 @@ def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
                 "asset_type": asset_type,
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=POSITION_FRAME_COLUMNS)
 
 
 def build_watchlist_monitor_frame(watchlists: dict[str, list[str]]) -> pd.DataFrame:
