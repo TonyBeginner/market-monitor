@@ -1406,7 +1406,6 @@ def load_global_market_snapshot():
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_telegram_hotspots():
     bot_token  = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
     chat_id    = getattr(config, "TELEGRAM_CHAT_ID",   "") or ""
@@ -1415,7 +1414,7 @@ def load_telegram_hotspots():
     return telegram_feed.get_recent_messages(
         bot_token,
         chat_id,
-        limit=5,
+        limit=12,
         claude_api_key=claude_key,
         groq_api_key=groq_key,
     )
