@@ -37,7 +37,7 @@ TELEGRAM_BOT_TOKEN = _get_secret("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = _get_secret("TELEGRAM_CHAT_ID")
 
 # ─── 刷新间隔（秒）──────────────────────────────────────────────
-REFRESH_INTERVAL = 30   # 默认30秒刷新一次
+REFRESH_INTERVAL = 300  # 5分钟刷新一次（大部分数据为日级，无需高频）
 
 # ─── 自选股列表（美股）──────────────────────────────────────────
 # 直接填 Yahoo Finance 代码即可
@@ -59,3 +59,4 @@ MY_CN_WATCHLIST = [
 # ─── 期货关注分类 ────────────────────────────────────────────────
 # 可选: 能源 / 贵金属 / 工业金属 / 农产品 / 股指
 MY_FUTURES_CATEGORIES = ["能源", "贵金属", "工业金属", "股指"]
+

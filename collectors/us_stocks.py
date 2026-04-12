@@ -26,6 +26,49 @@ def _get_fast_info_value(info, key: str, default=None):
     return getattr(info, key, default)
 
 
+STOCK_DISPLAY_NAMES = {
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "NVIDIA",
+    "GOOGL": "Alphabet",
+    "GOOG": "Alphabet",
+    "META": "Meta",
+    "AMZN": "Amazon",
+    "TSLA": "Tesla",
+    "BABA": "Alibaba",
+    "PDD": "PDD Holdings",
+    "JD": "JD.com",
+    "BIDU": "Baidu",
+    "NFLX": "Netflix",
+    "AMD": "AMD",
+    "INTC": "Intel",
+    "ORCL": "Oracle",
+    "CRM": "Salesforce",
+    "UBER": "Uber",
+    "SHOP": "Shopify",
+    "PYPL": "PayPal",
+    "DIS": "Disney",
+    "BRKB": "Berkshire Hathaway",
+}
+
+
+def _get_display_name(ticker, sym: str) -> str:
+    if sym in INDEX_NAMES:
+        return INDEX_NAMES[sym]
+    if sym in STOCK_DISPLAY_NAMES:
+        return STOCK_DISPLAY_NAMES[sym]
+    try:
+        info = ticker.info or {}
+        return (
+            info.get("shortName")
+            or info.get("longName")
+            or info.get("displayName")
+            or sym
+        )
+    except Exception:
+        return sym
+
+
 def get_quote(symbols: list[str]) -> pd.DataFrame:
     """
     批量获取实时报价（通常为延迟行情）
@@ -63,11 +106,12 @@ def get_quote(symbols: list[str]) -> pd.DataFrame:
 
             market_cap = _get_fast_info_value(info, "market_cap")
             avg_volume = _get_fast_info_value(info, "three_month_average_volume", 0) or 0
+            display_name = _get_display_name(ticker, sym)
 
             rows.append(
                 {
                     "代码": sym,
-                    "名称": INDEX_NAMES.get(sym, sym),
+                    "名称": display_name,
                     "现价": round(close_today, 2),
                     "涨跌额": round(change, 2),
                     "涨跌幅%": round(change_pct, 2),
@@ -107,3 +151,123 @@ def get_all_symbols() -> list[str]:
     for group in DEFAULT_US_STOCKS.values():
         syms.extend(group)
     return syms
+
+
+# 美股板块 ETF（SPDR 系列）
+SECTOR_ETFS = {
+    "XLK":  "科技",
+    "XLC":  "通信服务",
+    "XLY":  "消费者可选",
+    "XLP":  "消费者必选",
+    "XLF":  "金融",
+    "XLV":  "医疗保健",
+    "XLI":  "工业",
+    "XLB":  "原材料",
+    "XLRE": "房地产",
+    "XLE":  "能源",
+    "XLU":  "公用事业",
+}
+
+# S&P 500 各板块权重（%），用于 Treemap 面积大小，无需实时抓取
+SECTOR_SP500_WEIGHT = {
+    "XLK":  32.0,
+    "XLF":  13.2,
+    "XLV":  12.4,
+    "XLC":   8.9,
+    "XLY":  10.1,
+    "XLI":   8.3,
+    "XLP":   5.9,
+    "XLE":   3.6,
+    "XLB":   2.3,
+    "XLU":   2.4,
+    "XLRE":  2.2,
+}
+
+# 各板块代表性成分股与相对权重（近似展示用）
+SECTOR_COMPONENTS = {
+    "科技": [("NVDA", 24), ("AAPL", 22), ("MSFT", 26), ("AVGO", 12), ("ORCL", 8), ("CRM", 8)],
+    "通信服务": [("GOOGL", 36), ("META", 34), ("NFLX", 12), ("DIS", 10), ("TMUS", 8)],
+    "消费者可选": [("AMZN", 34), ("TSLA", 24), ("HD", 12), ("MCD", 10), ("BKNG", 10), ("NKE", 10)],
+    "消费者必选": [("WMT", 24), ("COST", 20), ("PG", 18), ("KO", 14), ("PEP", 14), ("PM", 10)],
+    "金融": [("BRKB", 26), ("JPM", 22), ("V", 16), ("MA", 14), ("BAC", 12), ("GS", 10)],
+    "医疗保健": [("LLY", 24), ("UNH", 18), ("JNJ", 16), ("MRK", 14), ("ABBV", 14), ("PFE", 14)],
+    "工业": [("GE", 18), ("RTX", 18), ("CAT", 18), ("UBER", 14), ("HON", 16), ("UNP", 16)],
+    "原材料": [("LIN", 28), ("SHW", 18), ("APD", 16), ("ECL", 14), ("FCX", 14), ("NEM", 10)],
+    "房地产": [("AMT", 22), ("PLD", 22), ("EQIX", 18), ("WELL", 14), ("O", 12), ("SPG", 12)],
+    "能源": [("XOM", 34), ("CVX", 28), ("COP", 14), ("SLB", 10), ("EOG", 8), ("MPC", 6)],
+    "公用事业": [("NEE", 22), ("SO", 18), ("DUK", 18), ("CEG", 16), ("AEP", 14), ("SRE", 12)],
+}
+
+
+def get_sector_performance() -> pd.DataFrame:
+    """获取美股各板块 ETF 当日涨跌幅及 AUM（作为市值权重）"""
+    rows = []
+    for symbol, name in SECTOR_ETFS.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="2d", interval="1d")
+            if len(hist) < 2:
+                continue
+            prev = float(hist["Close"].iloc[-2])
+            curr = float(hist["Close"].iloc[-1])
+            pct  = (curr - prev) / prev * 100
+            weight = SECTOR_SP500_WEIGHT.get(symbol, 2.0)
+            rows.append({"板块": name, "代码": symbol, "涨跌幅%": round(pct, 2), "AUM": weight})
+        except Exception as e:
+            print(f"[Sector] {symbol} 失败: {e}")
+    return pd.DataFrame(rows)
+
+
+def get_sector_constituent_performance() -> pd.DataFrame:
+    """获取美股板块代表成分股表现，用于层级热力图。"""
+    rows = []
+    symbols = []
+    for items in SECTOR_COMPONENTS.values():
+        symbols.extend(sym for sym, _ in items)
+    quote_df = get_quote(list(dict.fromkeys(symbols)))
+    if quote_df.empty:
+        return pd.DataFrame()
+
+    quote_map = quote_df.set_index("代码").to_dict("index")
+    for sector, items in SECTOR_COMPONENTS.items():
+        for sym, weight in items:
+            row = quote_map.get(sym)
+            if not row:
+                continue
+            rows.append({
+                "板块": sector,
+                "代码": sym,
+                "名称": row.get("名称", sym),
+                "涨跌幅%": row.get("涨跌幅%", 0),
+                "权重": weight,
+            })
+    return pd.DataFrame(rows)
+
+
+def get_earnings_calendar(symbols: list[str]) -> pd.DataFrame:
+    """获取自选股未来 30 天内的财报日期"""
+    from datetime import date, timedelta
+    today = date.today()
+    cutoff = today + timedelta(days=30)
+    rows = []
+    for sym in symbols:
+        try:
+            cal = yf.Ticker(sym).calendar
+            if cal is None:
+                continue
+            # yfinance 返回格式随版本变化
+            if isinstance(cal, dict):
+                dates = cal.get("Earnings Date") or []
+                earn_date = dates[0] if dates else None
+            else:
+                earn_date = None
+            if earn_date is None:
+                continue
+            d = pd.Timestamp(earn_date).date()
+            if today <= d <= cutoff:
+                rows.append({"代码": sym, "日期": d})
+        except Exception as e:
+            print(f"[Earnings] {sym} 失败: {e}")
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("日期").reset_index(drop=True)
+    return df

@@ -7,6 +7,10 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.watchlists.json
+cache/
+briefs/
+.claude/
 
 # OS
 .DS_Store

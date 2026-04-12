@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import config
 from collectors import us_stocks, cn_stocks, futures, telegram_feed
 from agents import morning_brief as ai_brief
-from utils import github_store
+from utils import github_store, disk_cache
+from utils import watchlist_store
 
 # ─── 页面配置 ─────────────────────────────────────────────────────
 st.set_page_config(
@@ -214,6 +215,11 @@ st.markdown("""
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    /* 可点击卡片悬停效果 */
+    .m-card.clickable:hover {
+        border-color: rgba(73,198,255,0.4) !important;
+        cursor: pointer !important;
+    }
     .m-value {
         font-weight: 700;
         line-height: 1.1;
@@ -366,6 +372,15 @@ st.markdown("""
     .stMarkdown, .stCaption, .stText {
         color: inherit;
     }
+    /* ── 面板容器（st.container border=True 覆盖）── */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background: rgba(10, 16, 28, 0.88) !important;
+        border: 1px solid rgba(110, 170, 255, 0.14) !important;
+        border-radius: 16px !important;
+        box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24) !important;
+        padding: 0.2rem 0.4rem 0.6rem 0.4rem !important;
+        margin-bottom: 1rem !important;
+    }
     .news-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -445,27 +460,350 @@ tushare_ok = _cached_pro is not None
 
 
 # ─── 缓存数据获取（TTL=5分钟）────────────────────────────────────
+def _disk_or_fetch(key: str, fetch_fn):
+    """优先读今日磁盘缓存，无则请求并保存到磁盘。"""
+    data = disk_cache.load(key)
+    if data is not None:
+        return data
+    data = fetch_fn()
+    if data is not None and not (hasattr(data, "empty") and data.empty):
+        disk_cache.save(key, data)
+    return data
+
+
+def get_us_watchlist() -> list[str]:
+    return watchlist_store.get_watchlist("us", config.MY_US_WATCHLIST)
+
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
-def load_us_data():
-    return us_stocks.get_quote(config.MY_US_WATCHLIST)
+def load_us_data(watchlist: tuple[str, ...], _version: str = "v3_user_watchlist"):
+    watch_key = "_".join(watchlist) if watchlist else "empty"
+    return _disk_or_fetch(f"us_data_{watch_key}", lambda: us_stocks.get_quote(list(watchlist)))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_us_index():
     syms = ["^GSPC", "^IXIC", "^DJI"]
-    return us_stocks.get_quote(syms)
+    return _disk_or_fetch("us_index", lambda: us_stocks.get_quote(syms))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_index(_tushare_ready: bool = False):
     # _tushare_ready 作为 cache key 的一部分，确保 tushare 初始化后不复用旧缓存
-    return cn_stocks.get_index_quote()
+    return _disk_or_fetch("cn_index", cn_stocks.get_index_quote)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_stocks(_tushare_ready: bool = False):
-    return cn_stocks.get_stock_quote(config.MY_CN_WATCHLIST)
+    return _disk_or_fetch("cn_stocks", lambda: cn_stocks.get_stock_quote(config.MY_CN_WATCHLIST))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_futures():
-    return futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES)
+    return _disk_or_fetch("intl_futures", lambda: futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES))
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_cn_futures():
+    return _disk_or_fetch("cn_futures", futures.get_cn_futures_quote)
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_sector_performance():
+    return _disk_or_fetch("sector_perf", us_stocks.get_sector_performance)
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_sector_constituents():
+    return _disk_or_fetch("sector_constituents", us_stocks.get_sector_constituent_performance)
+
+@st.cache_data(ttl=3600)
+def load_earnings_calendar(watchlist: tuple[str, ...]):
+    return us_stocks.get_earnings_calendar(list(watchlist))
+
+@st.cache_data(ttl=3600)
+def get_sparkline_prices(symbol: str, days: int = 30) -> list:
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(symbol).history(period=f"{days}d", interval="1d")
+        if hist.empty:
+            return []
+        return hist["Close"].dropna().tolist()
+    except Exception:
+        return []
+
+# 品种名 → (product_prefix, tushare_exchange)
+CN_FUTURES_TS_CODE = {
+    "螺纹钢":    ("RB",  "SHFE"),
+    "铁矿石":    ("I",   "DCE"),
+    "热轧卷板":  ("HC",  "SHFE"),
+    "焦炭":      ("J",   "DCE"),
+    "焦煤":      ("JM",  "DCE"),
+    "沪铜":      ("CU",  "SHFE"),
+    "沪铝":      ("AL",  "SHFE"),
+    "沪锌":      ("ZN",  "SHFE"),
+    "沪镍":      ("NI",  "SHFE"),
+    "沪锡":      ("SN",  "SHFE"),
+    "沪金":      ("AU",  "SHFE"),
+    "沪银":      ("AG",  "SHFE"),
+    "原油":      ("SC",  "INE"),
+    "PTA":       ("TA",  "CZCE"),
+    "甲醇":      ("MA",  "CZCE"),
+    "液化石油气": ("PG",  "DCE"),
+    "豆粕":      ("M",   "DCE"),
+    "豆油":      ("Y",   "DCE"),
+    "棕榈油":    ("P",   "DCE"),
+    "玉米":      ("C",   "DCE"),
+    "玉米淀粉":  ("CS",  "DCE"),
+    "沪深300":   ("IF",  "CFFEX"),
+    "中证500":   ("IC",  "CFFEX"),
+    "上证50":    ("IH",  "CFFEX"),
+    "中证1000":  ("IM",  "CFFEX"),
+}
+
+@st.cache_data(ttl=3600)
+def _get_main_fut_code(product: str, exchange: str) -> str:
+    """查当前主力合约 ts_code（按成交量最大）"""
+    try:
+        import tushare as ts
+        from datetime import timedelta
+        token = getattr(config, "TUSHARE_TOKEN", "") or ""
+        if not token:
+            return ""
+        pro = ts.pro_api(token=token)
+        # 往前找最近有交易的日期（最多回溯 7 天）
+        for offset in range(7):
+            trade_date = (datetime.now() - timedelta(days=offset)).strftime("%Y%m%d")
+            df = pro.fut_daily(trade_date=trade_date, exchange=exchange,
+                               fields="ts_code,vol")
+            if df is not None and not df.empty:
+                break
+        else:
+            return ""
+        prod_df = df[df["ts_code"].str.upper().str.startswith(product.upper())]
+        if prod_df.empty:
+            return ""
+        return prod_df.loc[prod_df["vol"].idxmax(), "ts_code"]
+    except Exception as e:
+        print(f"[Sparkline] 主力合约查询失败 {product}.{exchange}: {e}")
+        return ""
+
+@st.cache_data(ttl=3600)
+def get_sparkline_prices_ts(product: str, exchange: str, days: int = 30) -> list:
+    """用 Tushare 获取国内期货主力合约历史收盘价"""
+    try:
+        import tushare as ts
+        from datetime import timedelta
+        token = getattr(config, "TUSHARE_TOKEN", "") or ""
+        if not token:
+            return []
+        main_code = _get_main_fut_code(product, exchange)
+        if not main_code:
+            print(f"[Sparkline] 未找到主力合约: {product}.{exchange}")
+            return []
+        pro = ts.pro_api(token=token)
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        df = pro.fut_daily(ts_code=main_code, start_date=start, end_date=end,
+                           fields="trade_date,close")
+        if df is None or df.empty:
+            return []
+        df = df.sort_values("trade_date")
+        return df["close"].dropna().tolist()[-days:]
+    except Exception as e:
+        print(f"[Sparkline] Tushare 期货历史失败 {product}.{exchange}: {e}")
+        return []
+
+@st.cache_data(ttl=3600)
+def load_cn_history(ts_code: str) -> "pd.DataFrame":
+    return cn_stocks.get_history(ts_code)
+
+@st.cache_data(ttl=3600)
+def load_cn_futures_history(product: str) -> "pd.DataFrame":
+    try:
+        import tushare as ts
+        from datetime import timedelta
+
+        meta = CN_FUTURES_TS_CODE.get(product)
+        token = getattr(config, "TUSHARE_TOKEN", "") or ""
+        if not meta or not token:
+            return pd.DataFrame()
+
+        prod, exchange = meta
+        main_code = _get_main_fut_code(prod, exchange)
+        if not main_code:
+            return pd.DataFrame()
+
+        pro = ts.pro_api(token=token)
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=240)).strftime("%Y%m%d")
+        df = pro.fut_daily(
+            ts_code=main_code,
+            start_date=start,
+            end_date=end,
+            fields="trade_date,open,high,low,close,vol",
+        )
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df = df.sort_values("trade_date").set_index("trade_date")
+        df = df[["open", "high", "low", "close", "vol"]].copy()
+        df.columns = ["open", "high", "low", "close", "volume"]
+        return df.dropna()
+    except Exception as e:
+        print(f"[CN Futures] 历史数据获取失败 {product}: {e}")
+        return pd.DataFrame()
+
+
+def get_kline_cache_key(hist: "pd.DataFrame", symbol: str = "", asset_type: str = "") -> str:
+    """用资产身份 + 最后一根 K 线作为 AI 缓存失效依据。"""
+    if hist is None or hist.empty:
+        return f"{asset_type}|{symbol}|empty"
+    last_idx = hist.index[-1]
+    last = hist.iloc[-1]
+    idx_str = pd.Timestamp(last_idx).isoformat() if not pd.isna(last_idx) else "na"
+    return "|".join([
+        asset_type,
+        symbol,
+        idx_str,
+        f"{float(last.get('open', 0)):.6f}",
+        f"{float(last.get('high', 0)):.6f}",
+        f"{float(last.get('low', 0)):.6f}",
+        f"{float(last.get('close', 0)):.6f}",
+        f"{float(last.get('volume', 0)):.2f}",
+    ])
+
+
+@st.cache_data(ttl=None)
+def get_ai_market_asset_analysis(symbol: str, display_name: str, asset_type: str, kline_key: str, _hist: "pd.DataFrame") -> str:
+    return ai_brief.analyze_market_asset(symbol, display_name, asset_type, _hist)
+
+
+@st.cache_data(ttl=None)
+def get_ai_stock_detail(symbol: str, display_name: str, kline_key: str, _hist: "pd.DataFrame") -> str:
+    return ai_brief.analyze_stock_detail(symbol, display_name, _hist)
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_hsgt_history(days: int = 30) -> "pd.DataFrame":
+    return cn_stocks.get_hsgt_flow_history(days=days)
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_ggt_net_buy_latest() -> dict:
+    return cn_stocks.get_ggt_net_buy_latest()
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_ggt_net_buy_history(days: int = 30) -> "pd.DataFrame":
+    return cn_stocks.get_ggt_net_buy_history(days=days)
+
+def make_flow_bar_svg(values: list, width: int = 200, height: int = 50) -> str:
+    """生成资金流柱状图，正值自 0 轴向上，负值自 0 轴向下。"""
+    if not values or len(values) < 2:
+        return ""
+    clean_values = [v for v in values if v == v]
+    if len(clean_values) < 2:
+        return ""
+
+    n = len(clean_values)
+    gap = 1
+    bar_w = max(1.0, (width - gap * (n - 1)) / n)
+    max_abs = max(abs(v) for v in clean_values) or 1
+    zero_y = height / 2
+    usable_half = max(1.0, zero_y - 2)
+
+    rects = []
+    for idx, v in enumerate(clean_values):
+        x = idx * (bar_w + gap)
+        bar_h = max(1.0, abs(v) / max_abs * usable_half)
+        color = "#38f28b" if v >= 0 else "#ff6257"
+        y = zero_y - bar_h if v >= 0 else zero_y
+        rects.append(
+            f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_w:.2f}" height="{bar_h:.2f}" '
+            f'rx="0.8" fill="{color}" opacity="0.9" />'
+        )
+
+    axis = (
+        f'<line x1="0" y1="{zero_y:.2f}" x2="{width}" y2="{zero_y:.2f}" '
+        f'stroke="rgba(142,163,189,0.28)" stroke-width="1" />'
+    )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'style="display:block;">{axis}{"".join(rects)}</svg>'
+    )
+
+@st.cache_data(ttl=3600)
+def get_sparkline_prices_cn_index(ts_code: str, days: int = 30) -> list:
+    """用 Tushare index_daily 获取 A股指数历史收盘价"""
+    try:
+        import tushare as ts
+        from datetime import timedelta
+        token = getattr(config, "TUSHARE_TOKEN", "") or ""
+        if not token:
+            return []
+        pro = ts.pro_api(token=token)
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        df = pro.index_daily(ts_code=ts_code, start_date=start, end_date=end,
+                             fields="trade_date,close")
+        if df is None or df.empty:
+            return []
+        df = df.sort_values("trade_date")
+        return df["close"].dropna().tolist()[-days:]
+    except Exception as e:
+        print(f"[Sparkline] A股指数历史失败 {ts_code}: {e}")
+        return []
+
+def _build_sparklines_from_df(df: pd.DataFrame, name_col: str, code_col: str,
+                               code_transform=None, days: int = 30) -> dict:
+    """从 DataFrame 构建 {name: prices} sparkline 字典，code_transform 可选转换 symbol"""
+    result = {}
+    if code_col not in df.columns:
+        return result
+    for _, row in df.iterrows():
+        name = str(row[name_col])
+        sym = str(row[code_col])
+        if code_transform:
+            sym = code_transform(sym)
+        prices = get_sparkline_prices(sym, days=days)
+        result[name] = prices
+    return result
+
+def _legacy_make_sparkline_svg(prices: list, up: bool, width: int = 120, height: int = 40) -> str:
+    """纯 CSS div 迷你柱状图，兼容所有 Streamlit 版本。"""
+    if len(prices) < 2:
+        return ""
+    mn, mx = min(prices), max(prices)
+    if mx == mn:
+        return ""
+    color = "#38f28b" if up else "#ff6257"
+    n = len(prices)
+    bar_w = max(1, width // n - 1)
+    bars = "".join(
+        f'<div style="display:inline-block;width:{bar_w}px;height:{max(1, int((p - mn) / (mx - mn) * height))}px;'
+        f'background:{color};vertical-align:bottom;margin-right:1px;border-radius:1px;opacity:0.85;"></div>'
+        for p in prices
+    )
+    return (
+        f'<div style="width:{width}px;height:{height}px;display:flex;align-items:flex-end;'
+        f'margin-top:6px;opacity:0.9;">{bars}</div>'
+    )
+
+def make_sparkline_svg(prices: list, up: bool, width: int = 120, height: int = 40) -> str:
+    """生成轻量 SVG 折线 sparkline。"""
+    if len(prices) < 2:
+        return ""
+    mn, mx = min(prices), max(prices)
+    if mx == mn:
+        return ""
+    color = "#38f28b" if up else "#ff6257"
+    step_x = width / (len(prices) - 1)
+    points = []
+    for idx, price in enumerate(prices):
+        x = idx * step_x
+        y = height - ((price - mn) / (mx - mn) * (height - 4)) - 2
+        points.append(f"{x:.2f},{y:.2f}")
+
+    polyline = " ".join(points)
+    last_x, last_y = points[-1].split(",")
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'style="display:block;margin-top:6px;opacity:0.95;">'
+        f'<polyline points="{polyline}" fill="none" stroke="{color}" '
+        f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />'
+        f'<circle cx="{last_x}" cy="{last_y}" r="2.2" fill="{color}" />'
+        f'</svg>'
+    )
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_us_history(symbol, period, interval="1d"):
@@ -594,7 +932,16 @@ def style_table(df, pct_col="涨跌幅%"):
     return styled
 
 
-def render_table(df: pd.DataFrame, pct_col: str = "涨跌幅%", price_col: str = "现价"):
+def render_table(
+    df: pd.DataFrame,
+    pct_col: str = "涨跌幅%",
+    price_col: str = "现价",
+    detail_type: str = "",
+    symbol_col: str = "代码",
+    name_col: str = "名称",
+    clickable_cols: list[str] | None = None,
+    key_prefix: str = "table",
+):
     """用自定义 HTML 渲染行情表格，替代原生 st.dataframe。"""
     if df is None or df.empty:
         st.info("暂无数据")
@@ -603,15 +950,107 @@ def render_table(df: pd.DataFrame, pct_col: str = "涨跌幅%", price_col: str =
     # 找到实际的涨跌幅列
     actual_pct = next((c for c in [pct_col, "涨跌幅%", "涨跌幅"] if c in df.columns), None)
 
+    if detail_type and clickable_cols:
+        header_cols = st.columns(len(df.columns))
+        for col_ui, col_name in zip(header_cols, df.columns):
+            with col_ui:
+                st.markdown(
+                    f'<div style="padding:0.35rem 0.2rem 0.55rem 0.2rem;font-size:0.75rem;'
+                    f'font-weight:500;color:#5a7a9a;letter-spacing:0.05em;text-transform:uppercase;">'
+                    f'{html_lib.escape(str(col_name))}</div>',
+                    unsafe_allow_html=True,
+                )
+
+        for row_idx, (_, row) in enumerate(df.iterrows()):
+            row_cols = st.columns(len(df.columns))
+            detail_symbol = str(row.get(symbol_col, "")).strip() if symbol_col and symbol_col in df.columns else ""
+            if detail_type == "us_stock" and "代码" in df.columns:
+                detail_symbol = str(row.get("代码", detail_symbol)).strip()
+            detail_name = str(row.get(name_col, detail_symbol or "")) if name_col in df.columns else detail_symbol
+
+            for col_ui, col_name in zip(row_cols, df.columns):
+                val = row[col_name]
+                display = html_lib.escape(str(val))
+                style = "font-size:0.9rem;color:#c8d8ea;padding:0.45rem 0.2rem;"
+
+                if (
+                    detail_type == "us_stock"
+                    and col_name == name_col
+                    and "代码" in df.columns
+                ):
+                    code_val = str(row.get("代码", "")).strip()
+                    if code_val and str(val).strip() == code_val:
+                        display = html_lib.escape(us_stocks.STOCK_DISPLAY_NAMES.get(code_val, code_val))
+
+                if col_name == actual_pct:
+                    try:
+                        v = float(val)
+                        if v > 0:
+                            display = f"+{v:.2f}%"
+                            style = "font-size:0.9rem;color:#38f28b;font-weight:700;padding:0.45rem 0.2rem;"
+                        elif v < 0:
+                            display = f"{v:.2f}%"
+                            style = "font-size:0.9rem;color:#ff6257;font-weight:700;padding:0.45rem 0.2rem;"
+                        else:
+                            display = f"{v:.2f}%"
+                            style = "font-size:0.9rem;color:#8ea3bd;padding:0.45rem 0.2rem;"
+                    except Exception:
+                        pass
+                elif col_name == price_col or col_name == "现价":
+                    style = "font-size:0.9rem;color:#eaf2ff;font-weight:700;padding:0.45rem 0.2rem;"
+                elif col_name in ("涨跌额",):
+                    try:
+                        v = float(val)
+                        display = f"+{v:.2f}" if v > 0 else f"{v:.2f}"
+                        style = f"font-size:0.9rem;color:{'#38f28b' if v > 0 else '#ff6257' if v < 0 else '#8ea3bd'};padding:0.45rem 0.2rem;"
+                    except Exception:
+                        pass
+
+                with col_ui:
+                    if col_name in clickable_cols and detail_symbol:
+                        if st.button(str(val), key=f"{key_prefix}_{detail_type}_{detail_symbol}_{row_idx}_{col_name}", use_container_width=True):
+                            st.session_state["selected_asset"] = {
+                                "symbol": detail_symbol,
+                                "name": detail_name,
+                                "type": detail_type,
+                            }
+                            st.session_state["detail_request_id"] = st.session_state.get("detail_request_id", 0) + 1
+                            st.rerun()
+                    else:
+                        st.markdown(f'<div style="{style}">{display}</div>', unsafe_allow_html=True)
+            st.markdown('<div style="height:1px;background:rgba(110,170,255,0.06);margin:0.05rem 0 0.05rem 0;"></div>', unsafe_allow_html=True)
+        return
+
     header_cells = "".join(f'<th>{html_lib.escape(str(c))}</th>' for c in df.columns)
 
     rows_html = ""
+    table_triggers = []
     for _, row in df.iterrows():
         cells = ""
+        detail_symbol = str(row.get(symbol_col, "")).strip() if symbol_col and symbol_col in df.columns else ""
+        if detail_type == "us_stock" and "代码" in df.columns:
+            detail_symbol = str(row.get("代码", detail_symbol)).strip()
+        detail_name = str(row.get(name_col, detail_symbol or "")) if name_col in df.columns else detail_symbol
+        trigger_id = ""
+        row_trigger_attr = ""
+        if detail_type and detail_symbol:
+            trigger_token = quote(f"{detail_type}:{detail_symbol}", safe="").replace("%", "_")
+            trigger_id = f"__t{trigger_token}"
+            row_trigger_attr = f' data-trigger="{trigger_id}" id="item-{trigger_token}"'
+            table_triggers.append((trigger_id, detail_symbol, detail_name, detail_type))
         for col in df.columns:
             val = row[col]
             cell_style = ""
             display = html_lib.escape(str(val))
+
+            if (
+                detail_type == "us_stock"
+                and col == name_col
+                and "代码" in df.columns
+            ):
+                code_val = str(row.get("代码", "")).strip()
+                if code_val and str(val).strip() == code_val:
+                    display = html_lib.escape(us_stocks.STOCK_DISPLAY_NAMES.get(code_val, code_val))
 
             if col == actual_pct:
                 try:
@@ -637,6 +1076,11 @@ def render_table(df: pd.DataFrame, pct_col: str = "涨跌幅%", price_col: str =
                 except Exception:
                     pass
 
+            if trigger_id and col in (clickable_cols or [name_col, symbol_col]):
+                display = (
+                    f'<span{row_trigger_attr} style="cursor:pointer;text-decoration:none;'
+                    f'font-weight:700;color:#dfe9f8;">{display}</span>'
+                )
             cells += f'<td style="{cell_style}">{display}</td>'
         rows_html += f"<tr>{cells}</tr>"
 
@@ -678,6 +1122,16 @@ def render_table(df: pd.DataFrame, pct_col: str = "涨跌幅%", price_col: str =
     }}
     </style>
     """, unsafe_allow_html=True)
+    st.markdown('<div data-detail-scope="table"></div>', unsafe_allow_html=True)
+    for trigger_id, detail_symbol, detail_name, detail_type in table_triggers:
+        if st.button(trigger_id, key=f"table_{detail_type}_{detail_symbol}"):
+            st.session_state["selected_asset"] = {
+                "symbol": detail_symbol,
+                "name": detail_name,
+                "type": detail_type,
+            }
+            st.session_state["detail_request_id"] = st.session_state.get("detail_request_id", 0) + 1
+            st.rerun()
 
 
 def get_pct_col(df: pd.DataFrame, preferred: str = "涨跌幅%") -> str | None:
@@ -704,19 +1158,21 @@ def render_hero(title: str, text: str, kicker: str = "Market Monitor"):
 def render_status_strip(cards: list[dict]):
     if not cards:
         return
-    cols = st.columns(len(cards))
-    for col, card in zip(cols, cards):
-        with col:
-            st.markdown(
-                f"""
-                <div class="status-card">
-                    <div class="status-label">{html_lib.escape(str(card['label']))}</div>
-                    <div class="status-value">{html_lib.escape(str(card['value']))}</div>
-                    <div class="status-note">{html_lib.escape(str(card['note']))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    with st.container(border=True):
+        st.markdown('<div class="section-title">📡 市场温度计</div>', unsafe_allow_html=True)
+        cols = st.columns(len(cards))
+        for col, card in zip(cols, cards):
+            with col:
+                st.markdown(
+                    f"""
+                    <div class="status-card">
+                        <div class="status-label">{html_lib.escape(str(card['label']))}</div>
+                        <div class="status-value" style="color:{html_lib.escape(str(card.get('color', '#f2f7ff')))};">{html_lib.escape(str(card['value']))}</div>
+                        <div class="status-note">{html_lib.escape(str(card['note']))}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 
 def render_micro_status(items: list[dict]):
@@ -781,8 +1237,6 @@ def render_news_cards(df: pd.DataFrame):
 
 @get_fragment_decorator(run_every=config.REFRESH_INTERVAL)
 def render_hot_news_panel():
-    open_panel("🗞 热点消息")
-
     new_df = load_telegram_hotspots()
 
     # 累积消息到 session_state，避免每次刷新丢失历史条目
@@ -794,9 +1248,20 @@ def render_hot_news_panel():
         st.session_state[_key] = combined.head(20)
     display_df = st.session_state.get(_key, new_df).head(5)
 
-    render_news_cards(display_df)
-    close_panel()
+    with st.container(border=True):
+        st.markdown('<div class="section-title">🗞 热点消息</div>', unsafe_allow_html=True)
+        render_news_cards(display_df)
 
+
+TICKER_DOMAIN = {
+    "AAPL": "apple.com", "MSFT": "microsoft.com", "NVDA": "nvidia.com",
+    "GOOGL": "abc.xyz", "GOOG": "abc.xyz", "META": "meta.com",
+    "AMZN": "amazon.com", "TSLA": "tesla.com", "BABA": "alibaba.com",
+    "PDD": "pddholdings.com", "NFLX": "netflix.com", "AMD": "amd.com",
+    "INTC": "intel.com", "ORCL": "oracle.com", "CRM": "salesforce.com",
+    "UBER": "uber.com", "SHOP": "shopify.com", "PYPL": "paypal.com",
+    "DIS": "disney.com", "BRKB": "berkshirehathaway.com",
+}
 
 def render_market_heatmap(df: pd.DataFrame, title: str, name_col: str = "名称"):
     pct_col = get_pct_col(df)
@@ -812,46 +1277,73 @@ def render_market_heatmap(df: pd.DataFrame, title: str, name_col: str = "名称"
         return
 
     if "市值(亿)" in heatmap_df.columns:
-        heatmap_df["size"] = pd.to_numeric(heatmap_df["市值(亿)"], errors="coerce").fillna(0)
+        heatmap_df["_size"] = pd.to_numeric(heatmap_df["市值(亿)"], errors="coerce").fillna(1)
     else:
-        heatmap_df["size"] = 0
-    heatmap_df["size"] = heatmap_df["size"].where(heatmap_df["size"] > 0, 1)
+        heatmap_df["_size"] = 1
+    heatmap_df["_size"] = heatmap_df["_size"].where(heatmap_df["_size"] > 0, 1)
 
-    heatmap_df["label"] = heatmap_df.apply(
-        lambda row: f"{row[name_col]}<br>{format_pct(row[pct_col])}",
-        axis=1,
-    )
+    total = heatmap_df["_size"].sum()
 
-    fig = px.treemap(
-        heatmap_df,
-        path=[px.Constant(title), name_col],
-        values="size",
-        color=pct_col,
-        color_continuous_scale=[
-            [0.0, "#c9483b"],
-            [0.45, "#f1ddd7"],
-            [0.5, "#f3efe7"],
-            [0.55, "#d9e8de"],
-            [1.0, "#1f8f63"],
-        ],
-        color_continuous_midpoint=0,
-        custom_data=[pct_col],
+    tiles = ""
+    heatmap_triggers = []
+    for _, row in heatmap_df.sort_values("_size", ascending=False).iterrows():
+        ticker = str(row.get("代码", row[name_col]))
+        pct = float(row[pct_col])
+        size_pct = row["_size"] / total * 100
+        token_source = f"us_stock:{ticker}"
+        trigger_token = quote(token_source, safe="").replace("%", "_")
+        trigger_id = f"__t{trigger_token}"
+        card_id = f"card-{trigger_token}"
+        heatmap_triggers.append((trigger_id, ticker, str(row.get(name_col, ticker))))
+
+        if pct > 1.5:
+            bg = "#1a7a4a"
+        elif pct > 0:
+            bg = "#1f5c3a"
+        elif pct > -1.5:
+            bg = "#6b2d2d"
+        else:
+            bg = "#8b1a1a"
+
+        domain = TICKER_DOMAIN.get(ticker, "")
+        logo_html = (
+            f'<img src="https://logo.clearbit.com/{domain}" '
+            f'style="width:28px;height:28px;border-radius:6px;object-fit:contain;'
+            f'background:#fff;padding:2px;display:none;" '
+            f'onload="this.style.display=\'block\'" onerror="this.remove()">'
+            if domain else ""
+        )
+
+        pct_str = f"+{pct:.2f}%" if pct >= 0 else f"{pct:.2f}%"
+        pct_color = "#5effa0" if pct >= 0 else "#ff7b72"
+
+        tiles += f"""
+        <div id="{card_id}" data-trigger="{trigger_id}" style="flex:{size_pct:.1f} 1 {max(size_pct*1.2, 80):.0f}px;
+                    min-width:80px;min-height:90px;
+                    background:{bg};border-radius:8px;
+                    padding:10px 10px 8px 10px;
+                    display:flex;flex-direction:column;justify-content:space-between;
+                    position:relative;overflow:hidden;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <span style="font-weight:700;font-size:0.95rem;color:#e8f4ea;">{html_lib.escape(ticker)}</span>
+                {logo_html}
+            </div>
+            <span style="font-size:1.05rem;font-weight:600;color:{pct_color};">{pct_str}</span>
+        </div>"""
+
+    st.markdown(
+        f'<div style="display:flex;flex-wrap:wrap;gap:3px;width:100%;">{tiles}</div>',
+        unsafe_allow_html=True,
     )
-    fig.update_traces(
-        text=heatmap_df["label"],
-        texttemplate="%{text}",
-        textfont=dict(color="#12212f", size=16),
-        marker=dict(line=dict(color="rgba(255,253,248,0.95)", width=2)),
-        hovertemplate="<b>%{label}</b><br>涨跌幅: %{customdata[0]:+.2f}%<extra></extra>",
-    )
-    fig.update_layout(
-        margin=dict(l=0, r=0, t=8, b=0),
-        height=320,
-        paper_bgcolor="rgba(255,253,248,0.0)",
-        plot_bgcolor="rgba(255,253,248,0.0)",
-        coloraxis_showscale=False,
-    )
-    st.plotly_chart(fig, width='stretch')
+    for trigger_id, symbol, display_name in heatmap_triggers:
+        if st.button(trigger_id, key=f"heatmap_{symbol}"):
+            st.session_state["selected_asset"] = {
+                "symbol": symbol,
+                "name": display_name,
+                "type": "us_stock",
+            }
+            st.session_state["detail_request_id"] = st.session_state.get("detail_request_id", 0) + 1
+            st.rerun()
 
 
 def get_world_map_background_uri() -> str:
@@ -983,15 +1475,29 @@ def render_global_bubble_map(df: pd.DataFrame):
     )
 
 
+from contextlib import contextmanager
+
+@contextmanager
+def panel(title: str):
+    with st.container(border=True):
+        st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
+        yield
+
+
+# 保留旧接口兼容性（热点消息等地方仍在用）
 def open_panel(title: str):
     st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
-
 
 def close_panel():
     pass
 
 
-def summarize_market(us_idx: pd.DataFrame, cn_idx: pd.DataFrame, fut_df: pd.DataFrame) -> list[dict]:
+def summarize_market(
+    us_idx: pd.DataFrame,
+    cn_idx: pd.DataFrame,
+    intl_fut_df: pd.DataFrame,
+    cn_fut_df: pd.DataFrame,
+) -> list[dict]:
     def describe(df: pd.DataFrame, label: str):
         pct_col = get_pct_col(df)
         if df is None or df.empty or pct_col is None:
@@ -1011,6 +1517,233 @@ def summarize_market(us_idx: pd.DataFrame, cn_idx: pd.DataFrame, fut_df: pd.Data
         describe(fut_df, "商品与期货"),
     ]
     return cards
+
+
+def summarize_market_breadth(
+    us_idx: pd.DataFrame,
+    cn_idx: pd.DataFrame,
+    intl_fut_df: pd.DataFrame,
+    cn_fut_df: pd.DataFrame,
+) -> list[dict]:
+    def describe(df: pd.DataFrame, label: str) -> dict:
+        pct_col = get_pct_col(df)
+        if df is None or df.empty or pct_col is None:
+            return {"label": label, "value": "--", "note": "当前暂无可用行情", "color": "#8ea3bd"}
+        numeric = pd.to_numeric(df[pct_col], errors="coerce").dropna()
+        if numeric.empty:
+            return {"label": label, "value": "--", "note": "报价结构暂不可用", "color": "#8ea3bd"}
+        up_count = int((numeric > 0).sum())
+        total = int(len(numeric))
+        up_ratio = up_count / total if total else 0
+        return {
+            "label": label,
+            "value": f"{up_ratio:.0%} 上涨",
+            "note": f"{up_count}/{total} 上涨",
+            "color": "#38f28b" if up_ratio >= 0.5 else "#ff6257",
+        }
+
+    return [
+        describe(us_idx, "美国市场"),
+        describe(cn_idx, "中国市场"),
+        describe(intl_fut_df, "国际期货"),
+        describe(cn_fut_df, "国内期货"),
+    ]
+
+
+def render_sector_heatmap(df: pd.DataFrame, constituent_df: pd.DataFrame | None = None):
+    """渲染美股板块层级热力图：板块 -> 代表成分股。"""
+    if df is None or df.empty:
+        st.info("暂无板块数据")
+        return
+
+    df = df.copy()
+    df["涨跌幅%"] = pd.to_numeric(df["涨跌幅%"], errors="coerce").fillna(0)
+    df["AUM"] = pd.to_numeric(df.get("AUM", 1e9), errors="coerce").fillna(1e9)
+
+    if constituent_df is None or constituent_df.empty:
+        constituent_df = pd.DataFrame()
+
+    labels, parents, values, colors, texts, ids = [], [], [], [], [], []
+
+    def _color_for_pct(pct: float) -> str:
+        if pct > 1.5:
+            return "#1a7a4a"
+        if pct > 0:
+            return "#1f5c3a"
+        if pct > -1.5:
+            return "#6b2d2d"
+        return "#8b1a1a"
+
+    for _, row in df.iterrows():
+        sector = str(row["板块"])
+        sector_pct = float(row["涨跌幅%"])
+        sector_value = float(row["AUM"])
+        sector_id = f"sector:{sector}"
+
+        labels.append(sector)
+        parents.append("")
+        values.append(sector_value)
+        colors.append(_color_for_pct(sector_pct))
+        texts.append(f"{sector}<br>{sector_pct:+.2f}%")
+        ids.append(sector_id)
+
+        if constituent_df.empty:
+            continue
+        sub = constituent_df[constituent_df["板块"] == sector].copy()
+        if sub.empty:
+            continue
+        sub["权重"] = pd.to_numeric(sub["权重"], errors="coerce").fillna(1.0)
+        weight_sum = sub["权重"].sum() or 1.0
+        for _, srow in sub.iterrows():
+            sym = str(srow["代码"])
+            pct = float(pd.to_numeric(srow["涨跌幅%"], errors="coerce") or 0)
+            child_value = sector_value * (float(srow["权重"]) / weight_sum)
+            labels.append(sym)
+            parents.append(sector_id)
+            values.append(child_value)
+            colors.append(_color_for_pct(pct))
+            texts.append(f"{sym}<br>{pct:+.2f}%")
+            ids.append(f"{sector_id}:{sym}")
+
+    fig = go.Figure(go.Treemap(
+        ids=ids,
+        labels=labels,
+        parents=parents,
+        values=values,
+        branchvalues="total",
+        text=texts,
+        texttemplate="%{text}",
+        marker=dict(colors=colors, line=dict(width=2, color="#07111b")),
+        textfont=dict(color="#edf4ff", size=13),
+        hovertemplate="<b>%{label}</b><extra></extra>",
+        maxdepth=2,
+    ))
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=360,
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+def render_earnings_calendar(df: pd.DataFrame):
+    """渲染财报日历：按日期分组，每天一列"""
+    if df is None or df.empty:
+        st.info("未来 30 天内自选股暂无已知财报日期")
+        return
+
+    grouped = df.groupby("日期")
+    date_list = sorted(grouped.groups.keys())
+    cols = st.columns(len(date_list))
+
+    for col, d in zip(cols, date_list):
+        symbols = grouped.get_group(d)["代码"].tolist()
+        weekday = WEEKDAY_CN[d.weekday()]
+        with col:
+            st.markdown(
+                f'<div style="background:#0d1f35;border-radius:10px;padding:12px 14px;">'
+                f'<div style="font-size:1.3rem;font-weight:700;color:#edf4ff;">{d.month}月{d.day}日'
+                f'<span style="font-size:0.8rem;color:#8ea3bd;margin-left:6px;">{weekday}</span></div>',
+                unsafe_allow_html=True,
+            )
+            for sym in symbols:
+                trigger_token = quote(f"us_stock:{sym}", safe="").replace("%", "_")
+                trigger_id = f"__t{trigger_token}"
+                domain = TICKER_DOMAIN.get(sym, "")
+                logo = (
+                    f'<img src="https://logo.clearbit.com/{domain}" '
+                    f'style="width:24px;height:24px;border-radius:5px;object-fit:contain;'
+                    f'background:#fff;padding:2px;display:none;vertical-align:middle;" '
+                    f'onload="this.style.display=\'inline-block\'" onerror="this.remove()">'
+                    if domain else
+                    f'<span style="display:inline-block;width:24px;height:24px;border-radius:5px;'
+                    f'background:#1e3a5f;text-align:center;line-height:24px;font-size:0.65rem;'
+                    f'color:#8ea3bd;">{sym[:2]}</span>'
+                )
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:8px;margin-top:8px;">'
+                    f'{logo}'
+                    f'<span id="item-{trigger_token}" data-trigger="{trigger_id}" '
+                    f'style="font-weight:600;color:#dfe9f8;font-size:0.9rem;cursor:pointer;">{sym}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(trigger_id, key=f"earnings_{sym}"):
+                    st.session_state["selected_asset"] = {
+                        "symbol": sym,
+                        "name": sym,
+                        "type": "us_stock",
+                    }
+                    st.session_state["detail_request_id"] = st.session_state.get("detail_request_id", 0) + 1
+                    st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+
+@st.dialog("📊 资产详情", width="large")
+def show_asset_detail(symbol: str, display_name: str, asset_type: str = "us_stock"):
+    """点击卡片后弹出统一详情：K线 + AI 复盘/前景 or 财报分析。"""
+    st.markdown(f"### {display_name}")
+    if symbol:
+        st.caption(symbol)
+
+    type_label_map = {
+        "us_stock": "美股",
+        "us_index": "美股指数",
+        "cn_index": "A股指数",
+        "intl_future": "国际期货",
+        "cn_future": "国内期货",
+    }
+    st.caption(f"资产类型：{type_label_map.get(asset_type, asset_type)}")
+
+    with st.spinner("加载K线数据…"):
+        if asset_type in ("us_stock", "us_index"):
+            hist = load_us_history(symbol, "6mo")
+        elif asset_type == "intl_future":
+            hist = load_futures_history(symbol, "6mo")
+        elif asset_type == "cn_index":
+            hist = load_cn_history(symbol)
+        elif asset_type == "cn_future":
+            hist = load_cn_futures_history(symbol)
+        else:
+            hist = pd.DataFrame()
+
+    if not hist.empty:
+        render_kline(hist, display_name)
+    else:
+        st.info("暂无K线数据")
+        return
+
+    kline_key = get_kline_cache_key(hist, symbol=symbol, asset_type=asset_type)
+
+    st.divider()
+
+    if asset_type == "us_stock":
+        st.markdown("**📅 下一份财报时间**")
+        try:
+            import yfinance as yf
+
+            cal = yf.Ticker(symbol).calendar
+            if cal and isinstance(cal, dict):
+                dates = cal.get("Earnings Date") or []
+                if dates:
+                    next_date = pd.Timestamp(dates[0]).strftime("%Y-%m-%d")
+                    st.markdown(f"下次财报：**{next_date}**")
+                else:
+                    st.markdown("暂无财报日期")
+            else:
+                st.markdown("暂无财报日期")
+        except Exception:
+            st.markdown("暂无财报日期")
+
+        st.markdown("**🤖 AI 财报与前景分析**")
+        with st.spinner("生成股票 AI 分析…"):
+            st.markdown(get_ai_stock_detail(symbol, display_name, kline_key, hist))
+    else:
+        st.markdown("**🤖 AI 走势复盘与前景分析**")
+        with st.spinner("生成资产 AI 分析…"):
+            st.markdown(get_ai_market_asset_analysis(symbol, display_name, asset_type, kline_key, hist))
 
 
 def render_kline(df: pd.DataFrame, title: str):
@@ -1123,20 +1856,34 @@ def render_kline(df: pd.DataFrame, title: str):
         gridcolor="rgba(73,198,255,0.08)", gridwidth=0.6,
         showspikes=True, spikecolor="rgba(123,199,255,0.45)", spikethickness=1,
         tickfont=dict(color="#8ea3bd"),
+        # 跳过周末和节假日，防止 zoom 到空白区间时 K 线消失
+        rangebreaks=[dict(bounds=["sat", "mon"])],
+        type="date",
     )
     fig.update_yaxes(
         gridcolor="rgba(73,198,255,0.08)", gridwidth=0.6,
         showspikes=True, spikecolor="rgba(123,199,255,0.45)",
         tickfont=dict(color="#8ea3bd"),
+        autorange=True,
+        fixedrange=False,
     )
-    fig.update_yaxes(title_text="价格", title_font=dict(color="#8ea3bd"), row=1, col=1)
-    fig.update_yaxes(title_text="成交量", title_font=dict(color="#8ea3bd"), row=2, col=1)
+    fig.update_yaxes(
+        title_text="价格", title_font=dict(color="#8ea3bd"),
+        row=1, col=1,
+    )
+    fig.update_yaxes(
+        title_text="成交量", title_font=dict(color="#8ea3bd"),
+        # 成交量 y 轴独立，不跟价格联动
+        matches=None,
+        row=2, col=1,
+    )
 
-    st.plotly_chart(fig, width='stretch')
+    fig.update_layout(dragmode="pan")
+    st.plotly_chart(fig, width='stretch', config={"scrollZoom": True})
 
 
-def render_metrics_row(df: pd.DataFrame, name_col: str, price_col: str, pct_col: str, n_cols: int = 3):
-    """在多列中展示指标卡片"""
+def render_metrics_row(df: pd.DataFrame, name_col: str, price_col: str, pct_col: str, n_cols: int = 3, sparklines: dict = None, detail_type: str = "", symbol_col: str = "代码"):
+    """在多列中展示指标卡片，sparklines 为 {名称: [close prices]} 的可选字典"""
     if df is None or df.empty:
         st.info("数据加载中…")
         return
@@ -1154,11 +1901,11 @@ def render_metrics_row(df: pd.DataFrame, name_col: str, price_col: str, pct_col:
                 direction = "flat"
 
             val_class = "metric-up" if direction == "up" else ("metric-down" if direction == "down" else "metric-flat")
-            label = html_lib.escape(str(row[name_col]))
+            raw_label = str(row[name_col])
+            label = html_lib.escape(raw_label)
             value = html_lib.escape(str(row[price_col]))
             delta = html_lib.escape(delta_str)
 
-            # 根据数字长度自动缩小字号，保持卡片高度一致
             val_len = len(value.replace(",", "").replace(".", ""))
             if val_len <= 5:
                 font_size = "1.75rem"
@@ -1169,16 +1916,52 @@ def render_metrics_row(df: pd.DataFrame, name_col: str, price_col: str, pct_col:
             else:
                 font_size = "0.95rem"
 
-            st.markdown(
-                f"""
-                <div class="m-card">
-                    <div class="m-label">{label}</div>
-                    <div class="m-value {val_class}" style="font-size:{font_size}">{value}</div>
-                    <span class="m-badge {direction}">{delta}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            spark_html = ""
+            if sparklines:
+                prices = sparklines.get(str(row[name_col]), [])
+                spark_html = make_sparkline_svg(prices, direction != "down")
+
+            detail_symbol = str(row.get(symbol_col, "")).strip() if symbol_col else ""
+            if not detail_symbol and detail_type == "cn_future":
+                detail_symbol = raw_label
+            can_open = bool(detail_type and detail_symbol)
+
+            token_source = f"{detail_type}:{detail_symbol}"
+            trigger_token = quote(token_source, safe="").replace("%", "_")
+            trigger_id = f"__t{trigger_token}"
+            card_id = f"card-{trigger_token}" if can_open else ""
+            id_attr = f' id="{card_id}"' if card_id else ""
+            card_class = "m-card clickable" if can_open else "m-card"
+
+            if spark_html:
+                card_html = (
+                    f'<div class="{card_class}" style="position:relative;overflow:hidden;" data-trigger="{trigger_id}"{id_attr}>'
+                    f'<div style="position:absolute;top:8px;right:8px;opacity:0.85;">{spark_html}</div>'
+                    f'<div class="m-label">{label}</div>'
+                    f'<div class="m-value {val_class}" style="font-size:{font_size}">{value}</div>'
+                    f'<span class="m-badge {direction}">{delta}</span>'
+                    f'</div>'
+                )
+            else:
+                card_html = (
+                    f'<div class="{card_class}" data-trigger="{trigger_id}"{id_attr}>'
+                    f'<div class="m-label">{label}</div>'
+                    f'<div class="m-value {val_class}" style="font-size:{font_size}">{value}</div>'
+                    f'<span class="m-badge {direction}">{delta}</span>'
+                    f'</div>'
+                )
+            st.markdown(card_html, unsafe_allow_html=True)
+
+            # 隐藏触发按钮（绝对定位移出屏幕，保留 JS 可点击性）
+            if can_open:
+                if st.button(trigger_id, key=f"trigger_{trigger_token}"):
+                    st.session_state["selected_asset"] = {
+                        "symbol": detail_symbol,
+                        "name": raw_label,
+                        "type": detail_type,
+                    }
+                    st.session_state["detail_request_id"] = st.session_state.get("detail_request_id", 0) + 1
+                    st.rerun()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1201,7 +1984,7 @@ with st.sidebar:
 
     page = st.radio(
         "导航",
-        ["🏠 市场总览", "🤖 AI 早报", "🇺🇸 美股", "🇨🇳 A股", "📦 期货", "📊 K线图表"],
+        ["🏠 市场总览", "🤖 AI 早报", "US 美股", "CN A股", "📦 期货", "📊 K线图表"],
         label_visibility="collapsed",
     )
 
@@ -1230,6 +2013,144 @@ with st.sidebar:
     st.caption(f"自动刷新间隔：{format_refresh_interval(config.REFRESH_INTERVAL)}")
 
 
+# ── 注入 JS：隐藏所有 __t 开头的触发按钮 ────────────────────────
+import streamlit.components.v1 as _components
+_components.html("""
+<script>
+(function() {
+    return;
+    function setup() {
+        try {
+            var doc = window.parent.document;
+
+            // 1. 隐藏所有 __t 触发按钮
+            doc.querySelectorAll('[id^="card-"]').forEach(function(card) {
+                var triggerText = card.getAttribute('data-trigger') || ('__t' + card.id.slice(5));
+                if (!triggerText) return;
+
+            function findLocalTriggerButton(card, triggerText) {
+                var node = card.closest('[data-testid="column"]') || card.parentElement;
+                while (node) {
+                    var btns = node.querySelectorAll('button');
+                    for (var i = btns.length - 1; i >= 0; i--) {
+                        var txt = (btns[i].innerText || btns[i].textContent || '').trim();
+                        if (txt === triggerText) return btns[i];
+                    }
+                    node = node.parentElement;
+                }
+                return null;
+            }
+
+            // 2. 给 id="card-XXX" 的卡片绑定点击事件
+            doc.querySelectorAll('[id^="card-"]').forEach(function(card) {
+                card.style.cursor = 'pointer';
+                card.onclick = function() {
+                    var triggerText = card.getAttribute('data-trigger') || ('__t' + card.id.slice(5));
+                    var btn = findLocalTriggerButton(card, triggerText);
+                    if (btn) {
+                        btn.click();
+                        return;
+                    }
+                    var btns = doc.querySelectorAll('button');
+                    for (var i = btns.length - 1; i >= 0; i--) {
+                        if ((btns[i].innerText || btns[i].textContent || '').trim() === triggerText) {
+                            btns[i].click();
+                            return;
+                        }
+                    }
+                };
+            });
+        } catch(e) {}
+    }
+
+    setup();
+    setTimeout(setup, 150);
+    setTimeout(setup, 500);
+    var obs = new MutationObserver(setup);
+    try { obs.observe(window.parent.document.body, {childList:true, subtree:true}); } catch(e) {}
+})();
+</script>
+""", height=0)
+
+# ── 资产详情弹窗触发（全局，所有页面均有效）──────────────────────
+_components.html("""
+<script>
+(function() {
+    function hideInternalDetailButtons() {
+        try {
+            var doc = window.parent.document;
+            doc.querySelectorAll('button').forEach(function(btn) {
+                var txt = (btn.innerText || btn.textContent || '').trim();
+                if (!txt.startsWith('__t')) return;
+                var wrap = btn.closest('[data-testid="stButton"]');
+                if (!wrap) return;
+                wrap.style.cssText =
+                    'position:absolute!important;left:-9999px!important;top:auto!important;'
+                    + 'width:1px!important;height:1px!important;overflow:hidden!important;';
+            });
+        } catch (e) {}
+    }
+
+    function bindCardToLocalButton() {
+        try {
+            var doc = window.parent.document;
+            doc.querySelectorAll('[data-trigger]').forEach(function(el) {
+                var triggerText = el.getAttribute('data-trigger');
+                if (!triggerText) return;
+                if (el.dataset.boundTrigger === triggerText) return;
+
+                el.dataset.boundTrigger = triggerText;
+                el.style.cursor = 'pointer';
+                el.onclick = function() {
+                    var node = el.closest('[data-testid="column"]') || el.parentElement;
+                    while (node) {
+                        var btns = node.querySelectorAll('button');
+                        for (var i = btns.length - 1; i >= 0; i--) {
+                            var txt = (btns[i].innerText || btns[i].textContent || '').trim();
+                            if (txt === triggerText || txt === '查看详情') {
+                                btns[i].click();
+                                return;
+                            }
+                        }
+                        node = node.parentElement;
+                    }
+                    var btns = doc.querySelectorAll('button');
+                    for (var j = btns.length - 1; j >= 0; j--) {
+                        var txt2 = (btns[j].innerText || btns[j].textContent || '').trim();
+                        if (txt2 === triggerText) {
+                            btns[j].click();
+                            return;
+                        }
+                    }
+                };
+            });
+        } catch (e) {}
+    }
+
+    hideInternalDetailButtons();
+    bindCardToLocalButton();
+    setTimeout(hideInternalDetailButtons, 100);
+    setTimeout(bindCardToLocalButton, 100);
+    setTimeout(hideInternalDetailButtons, 400);
+    setTimeout(bindCardToLocalButton, 400);
+    var obs = new MutationObserver(function() {
+        hideInternalDetailButtons();
+        bindCardToLocalButton();
+    });
+    try { obs.observe(window.parent.document.body, {childList:true, subtree:true}); } catch(e) {}
+})();
+</script>
+""", height=0)
+
+if st.session_state.get("detail_request_id", 0) > st.session_state.get("detail_shown_id", 0):
+    asset = st.session_state.get("selected_asset") or {}
+    sym = asset.get("symbol", "")
+    name = asset.get("name", sym)
+    asset_type = asset.get("type", "us_stock")
+    if sym:
+        st.session_state["detail_shown_id"] = st.session_state.get("detail_request_id", 0)
+        show_asset_detail(sym, name, asset_type)
+
 # ════════════════════════════════════════════════════════════════════
 #  页面：市场总览
 # ════════════════════════════════════════════════════════════════════
@@ -1246,30 +2167,42 @@ if page == "🏠 市场总览":
         cn_idx = load_cn_index(_tushare_ready=tushare_ok)
     with st.spinner("加载期货数据…"):
         fut_df = load_futures()
+    with st.spinner("加载国内期货数据…"):
+        cn_fut_df_dash = load_cn_futures()
     with st.spinner("加载自选股…"):
-        us_df = load_us_data()
+        us_df = load_us_data(tuple(get_us_watchlist()))
     with st.spinner("加载全球市场快照…"):
         global_df = load_global_market_snapshot()
-    open_panel("🌐 全球市场追踪")
-    render_global_bubble_map(global_df)
-    close_panel()
+    with panel("🌐 全球市场追踪"):
+        render_global_bubble_map(global_df)
 
     render_hot_news_panel()
 
-    render_status_strip(summarize_market(us_idx, cn_idx, fut_df))
+    render_status_strip(summarize_market_breadth(us_idx, cn_idx, fut_df, cn_fut_df_dash))
 
-    if True:
-        open_panel("🔥 美股热力表")
-        render_market_heatmap(us_df, "美股自选")
-        close_panel()
 
-        open_panel("🇺🇸 美国指数脉搏")
-        render_metrics_row(us_idx, "名称", "现价", "涨跌幅%", n_cols=3)
-        close_panel()
+    col_sec, col_earn = st.columns(2)
+    with col_sec:
+        with panel("🗂️ 美股板块热力图"):
+            sector_df = load_sector_performance()
+            sector_constituent_df = load_sector_constituents()
+            render_sector_heatmap(sector_df, sector_constituent_df)
+    with col_earn:
+        with panel("📅 财报日历"):
+            earn_df = load_earnings_calendar(tuple(get_us_watchlist()))
+            render_earnings_calendar(earn_df)
 
-        open_panel("🇨🇳 A股风向")
+    with panel("🇺🇸 美国指数脉搏"):
+        us_idx_spark = _build_sparklines_from_df(us_idx, "名称", "代码") if not us_idx.empty else {}
+        render_metrics_row(us_idx, "名称", "现价", "涨跌幅%", n_cols=3, sparklines=us_idx_spark, detail_type="us_index", symbol_col="代码")
+
+    with panel("🇨🇳 A股风向"):
         if cn_idx is not None and not cn_idx.empty and cn_idx["现价"].iloc[0] != "—":
-            render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3)
+            cn_idx_spark = {
+                str(row["名称"]): get_sparkline_prices_cn_index(str(row["代码"]))
+                for _, row in cn_idx.iterrows() if "代码" in cn_idx.columns
+            }
+            render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3, sparklines=cn_idx_spark, detail_type="cn_index", symbol_col="代码")
         else:
             err = getattr(cn_stocks, "_last_error", None)
             if err:
@@ -1277,25 +2210,44 @@ if page == "🏠 市场总览":
             elif not tushare_ok:
                 st.info("Tushare 未初始化，请确认 Token 配置正确后刷新页面。")
             else:
-                render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3)
-        close_panel()
+                render_metrics_row(cn_idx, "名称", "现价", "涨跌幅%", n_cols=3, detail_type="cn_index", symbol_col="代码")
 
-        open_panel("📦 大宗商品与风险偏好")
+    with panel("🌐 国际期货"):
         if not fut_df.empty:
-            key_items = fut_df[fut_df["品种"].isin(["WTI原油", "黄金", "铜", "标普500期货", "纳指期货"])]
-            render_metrics_row(key_items, "品种", "现价", "涨跌幅%", n_cols=5)
+            key_names = ["WTI原油", "黄金", "铜", "标普500期货", "纳指期货"]
+            key_items = fut_df[fut_df["品种"].isin(key_names)].copy()
+            # 获取 sparkline 数据（按品种名 → yfinance 代码）
+            name_to_sym = dict(zip(fut_df["品种"], fut_df["代码"])) if "代码" in fut_df.columns else {}
+            sparklines = {}
+            for name in key_names:
+                sym = name_to_sym.get(name)
+                if sym:
+                    sparklines[name] = get_sparkline_prices(sym, days=30)
+            render_metrics_row(key_items, "品种", "现价", "涨跌幅%", n_cols=5, sparklines=sparklines, detail_type="intl_future", symbol_col="代码")
         else:
-            st.info("当前未获取到期货数据")
-        close_panel()
+            st.info("当前未获取到国际期货数据")
 
-    open_panel("⭐ 核心自选股观察")
-    if not us_df.empty:
-        display_cols = ["名称", "现价", "涨跌额", "涨跌幅%", "更新时间"]
-        available = [c for c in display_cols if c in us_df.columns]
-        render_table(us_df[available])
-    else:
-        st.info("当前未获取到美股自选数据")
-    close_panel()
+    with panel("🇨🇳 国内期货"):
+        if not cn_fut_df_dash.empty:
+            key_cn_names = ["螺纹钢", "沪金", "沪铜", "沪深300", "原油"]
+            key_cn = cn_fut_df_dash[cn_fut_df_dash["品种"].isin(key_cn_names)]
+            cn_fut_spark = {
+                name: get_sparkline_prices_ts(*CN_FUTURES_TS_CODE[name])
+                for name in key_cn_names if name in CN_FUTURES_TS_CODE
+            }
+            render_metrics_row(key_cn, "品种", "现价", "涨跌幅%", n_cols=5, sparklines=cn_fut_spark, detail_type="cn_future", symbol_col="品种")
+        else:
+            st.info("当前未获取到国内期货数据")
+
+    with panel("⭐ 核心自选股观察"):
+        if not us_df.empty:
+            us_stock_spark = _build_sparklines_from_df(us_df, "名称", "代码")
+            render_metrics_row(us_df, "名称", "现价", "涨跌幅%", n_cols=3, sparklines=us_stock_spark, detail_type="us_stock", symbol_col="代码")
+            display_cols = ["名称", "现价", "涨跌额", "涨跌幅%", "更新时间"]
+            available = [c for c in display_cols if c in us_df.columns]
+            render_table(us_df[available], detail_type="us_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称"], key_prefix="us_watch_table")
+        else:
+            st.info("当前未获取到美股自选数据")
 
     render_micro_status(
         [
@@ -1367,48 +2319,76 @@ elif page == "🤖 AI 早报":
             # 写 GitHub（持久化）
             github_store.write_brief(today_str, brief_content, brief_time, github_token)
 
+    # 4. 08:00 前无今日早报 → 尝试展示昨日早报
+    yesterday_str = ""
+    yesterday_content = ""
+    yesterday_time = ""
+    if not brief_content and now_sgt.hour < 8:
+        from datetime import timedelta as _td
+        yesterday_str = (now_sgt - _td(days=1)).strftime("%Y-%m-%d")
+        yesterday_path = os.path.join(brief_dir, f"{yesterday_str}.md")
+        if os.path.exists(yesterday_path):
+            with open(yesterday_path, "r", encoding="utf-8") as f:
+                saved = f.read()
+            lines = saved.splitlines()
+            if lines and lines[0].startswith("<!-- generated:"):
+                yesterday_time = lines[0].replace("<!-- generated:", "").replace("-->", "").strip()
+                yesterday_content = "\n".join(lines[1:]).strip()
+            else:
+                yesterday_content = saved
+        if not yesterday_content:
+            yesterday_content, yesterday_time = github_store.read_brief(yesterday_str)
+
     if brief_content:
-        open_panel(f"今日早报 · {today_str}")
-        if brief_time:
-            st.caption(f"生成时间：{brief_time}")
-        st.markdown(brief_content)
-        st.download_button(
-            label="📥 下载早报（txt）",
-            data=brief_content,
-            file_name=f"早报_{today_str}.txt",
-            mime="text/plain",
-        )
-        close_panel()
+        with panel(f"今日早报 · {today_str}"):
+            if brief_time:
+                st.caption(f"生成时间：{brief_time}")
+            st.markdown(brief_content)
+            st.download_button(
+                label="📥 下载早报（txt）",
+                data=brief_content,
+                file_name=f"早报_{today_str}.txt",
+                mime="text/plain",
+            )
+    elif yesterday_content:
+        with panel(f"昨日早报 · {yesterday_str}（今日早报将于 08:00 SGT 生成）"):
+            if yesterday_time:
+                st.caption(f"生成时间：{yesterday_time}")
+            st.markdown(yesterday_content)
+            st.download_button(
+                label="📥 下载早报（txt）",
+                data=yesterday_content,
+                file_name=f"早报_{yesterday_str}.txt",
+                mime="text/plain",
+            )
     else:
-        open_panel("今日早报")
-        st.info(f"今日早报将在 **08:00 SGT** 自动生成。\n\n当前新加坡时间：{now_sgt.strftime('%H:%M')}")
-        close_panel()
+        with panel("今日早报"):
+            st.info(f"今日早报将在 **08:00 SGT** 自动生成。\n\n当前新加坡时间：{now_sgt.strftime('%H:%M')}")
 
-    open_panel("🔍 单标的快速分析")
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-    with c1:
-        ana_symbol = st.text_input("代码", "NVDA", key="ana_sym")
-    with c2:
-        ana_name = st.text_input("名称", "英伟达", key="ana_name")
-    with c3:
-        ana_pct = st.number_input("涨跌幅%", value=2.61, step=0.1, key="ana_pct")
-    with c4:
-        ana_market = st.selectbox("市场", ["美股", "A股", "期货"], key="ana_mkt")
-        st.write("")
-        ana_btn = st.button("分析原因", key="ana_go")
+    with panel("🔍 单标的快速分析"):
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        with c1:
+            ana_symbol = st.text_input("代码", "NVDA", key="ana_sym")
+        with c2:
+            ana_name = st.text_input("名称", "英伟达", key="ana_name")
+        with c3:
+            ana_pct = st.number_input("涨跌幅%", value=2.61, step=0.1, key="ana_pct")
+        with c4:
+            ana_market = st.selectbox("市场", ["美股", "A股", "期货"], key="ana_mkt")
+            st.write("")
+            ana_btn = st.button("分析原因", key="ana_go")
 
-    if ana_btn and ana_symbol:
-        with st.spinner("分析中…"):
-            analysis = ai_brief.analyze_anomaly(ana_symbol, ana_name, ana_pct, ana_market)
-        arrow = "📈" if ana_pct >= 0 else "📉"
-        st.info(f"{arrow} **{ana_name} {ana_pct:+.2f}%**\n\n{analysis}")
-    close_panel()
+        if ana_btn and ana_symbol:
+            with st.spinner("分析中…"):
+                analysis = ai_brief.analyze_anomaly(ana_symbol, ana_name, ana_pct, ana_market)
+            arrow = "📈" if ana_pct >= 0 else "📉"
+            st.info(f"{arrow} **{ana_name} {ana_pct:+.2f}%**\n\n{analysis}")
 
 
 # ════════════════════════════════════════════════════════════════════
 #  页面：美股
 # ════════════════════════════════════════════════════════════════════
-elif page == "🇺🇸 美股":
+elif page == "US 美股":
     render_hero(
         "美股行情",
         "聚焦自选股、强弱排序和单标的查询，让美股页面更像可操作的 watchlist 终端。",
@@ -1418,59 +2398,98 @@ elif page == "🇺🇸 美股":
     tab1, tab2 = st.tabs(["📋 自选股列表", "🔍 搜索查询"])
 
     with tab1:
+        current_watchlist = get_us_watchlist()
+
+        with panel("自选股管理"):
+            manage_col1, manage_col2 = st.columns([1.1, 1.4])
+            with manage_col1:
+                add_input = st.text_input(
+                    "添加美股代码",
+                    placeholder="例如：AMD / NFLX / BRK.B",
+                    key="us_watchlist_add_input",
+                )
+                if st.button("添加到自选股", key="us_watchlist_add_btn", use_container_width=True):
+                    normalized_input = add_input.replace("，", ",").replace(" ", ",")
+                    new_symbols = [s.strip().upper() for s in normalized_input.split(",") if s.strip()]
+                    if not new_symbols:
+                        st.warning("请先输入至少一个美股代码。")
+                    else:
+                        updated = watchlist_store.save_watchlist("us", current_watchlist + new_symbols)
+                        st.cache_data.clear()
+                        st.success(f"已保存 {len(updated)} 个自选股")
+                        st.rerun()
+            with manage_col2:
+                remove_symbols = st.multiselect(
+                    "删除自选股",
+                    options=current_watchlist,
+                    default=[],
+                    key="us_watchlist_remove_symbols",
+                )
+                if st.button("从自选股删除", key="us_watchlist_remove_btn", use_container_width=True):
+                    if not remove_symbols:
+                        st.warning("请先选择要删除的股票。")
+                    else:
+                        updated = [sym for sym in current_watchlist if sym not in set(remove_symbols)]
+                        if not updated:
+                            st.warning("至少保留 1 个自选股。")
+                        else:
+                            watchlist_store.save_watchlist("us", updated)
+                            st.cache_data.clear()
+                            st.success(f"已删除 {len(remove_symbols)} 个自选股")
+                            st.rerun()
+            st.caption("这里的自选股会同步影响首页、美股页、财报日历和 K 线选股。")
         with st.spinner("加载数据…"):
-            us_df = load_us_data()
+            us_df = load_us_data(tuple(current_watchlist))
         if not us_df.empty:
-            # 涨跌榜
-            open_panel("强弱分布")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("🔴 涨幅榜 Top 5")
-                top5 = us_df.nlargest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
-                render_table(top5)
-            with col2:
-                st.subheader("🟢 跌幅榜 Top 5")
-                bot5 = us_df.nsmallest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
-                render_table(bot5)
-            close_panel()
-            open_panel("全部自选股")
-            render_table(us_df)
-            close_panel()
+            with panel("自选股卡片"):
+                us_stock_spark = _build_sparklines_from_df(us_df, "名称", "代码")
+                render_metrics_row(us_df, "名称", "现价", "涨跌幅%", n_cols=3, sparklines=us_stock_spark, detail_type="us_stock", symbol_col="代码")
+            with panel("强弱分布"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("🔴 涨幅榜 Top 5")
+                    top5 = us_df.nlargest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
+                    render_table(top5, detail_type="us_stock", symbol_col="名称", name_col="名称", clickable_cols=["名称"], key_prefix="us_top5")
+                with col2:
+                    st.subheader("🟢 跌幅榜 Top 5")
+                    bot5 = us_df.nsmallest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
+                    render_table(bot5, detail_type="us_stock", symbol_col="名称", name_col="名称", clickable_cols=["名称"], key_prefix="us_bot5")
+            with panel("全部自选股"):
+                render_table(us_df, detail_type="us_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称", "代码"], key_prefix="us_full_table")
 
     with tab2:
-        open_panel("单标的查询")
-        symbol_input = st.text_input("输入美股代码（如 AAPL、TSLA）", "AAPL").upper()
-        period_map = {
-            "1天": ("1d", "5m"),
-            "1个月": ("1mo", "1d"),
-            "3个月": ("3mo", "1d"),
-            "6个月": ("6mo", "1d"),
-            "1年": ("1y", "1d"),
-            "2年": ("2y", "1d"),
-            "5年": ("5y", "1d"),
-            "全部": ("max", "1d"),
-        }
-        period_sel = st.selectbox("查看区间", list(period_map.keys()), index=5)
+        with panel("单标的查询"):
+            symbol_input = st.text_input("输入美股代码（如 AAPL、TSLA）", "AAPL").upper()
+            period_map = {
+                "1天": ("1d", "5m"),
+                "1个月": ("1mo", "1d"),
+                "3个月": ("3mo", "1d"),
+                "6个月": ("6mo", "1d"),
+                "1年": ("1y", "1d"),
+                "2年": ("2y", "1d"),
+                "5年": ("5y", "1d"),
+                "全部": ("max", "1d"),
+            }
+            period_sel = st.selectbox("查看K线数据区间", list(period_map.keys()), index=5)
 
-        if symbol_input:
-            quote = us_stocks.get_quote([symbol_input])
-            if not quote.empty:
-                row = quote.iloc[0]
-                c1, c2, c3 = st.columns(3)
-                with c1: st.metric("现价", row.get("现价", "—"))
-                with c2: st.metric("涨跌幅", format_pct(row.get("涨跌幅%", 0)))
-                with c3: st.metric("涨跌额", row.get("涨跌额", "—"))
+            if symbol_input:
+                quote = us_stocks.get_quote([symbol_input])
+                if not quote.empty:
+                    row = quote.iloc[0]
+                    c1, c2, c3 = st.columns(3)
+                    with c1: st.metric("现价", row.get("现价", "—"))
+                    with c2: st.metric("涨跌幅", format_pct(row.get("涨跌幅%", 0)))
+                    with c3: st.metric("涨跌额", row.get("涨跌额", "—"))
 
-            period_value, interval_value = period_map[period_sel]
-            hist = load_us_history(symbol_input, period_value, interval_value)
-            render_kline(hist, f"{symbol_input} K线图")
-        close_panel()
+                period_value, interval_value = period_map[period_sel]
+                hist = load_us_history(symbol_input, period_value, interval_value)
+                render_kline(hist, f"{symbol_input} K线图")
 
 
 # ════════════════════════════════════════════════════════════════════
 #  页面：A股
 # ════════════════════════════════════════════════════════════════════
-elif page == "🇨🇳 A股":
+elif page == "CN A股":
     render_hero(
         "A股行情",
         "把指数、北向资金和自选股集中呈现，适合早盘看方向、盘中盯风格切换。",
@@ -1481,77 +2500,136 @@ elif page == "🇨🇳 A股":
         st.warning("请先在 config.py 中配置 Tushare Token，然后重启应用。")
         st.stop()
 
-    open_panel("🔀 北向与南向资金")
-    flow = cn_stocks.get_northbound_flow()
-    flow_err = flow.get("error")
-    if flow_err:
-        st.warning(f"⚠️ 北向资金数据获取失败：{flow_err}")
-    else:
-        trade_date = flow.get("trade_date") or ""
-        date_label = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}" if len(trade_date) == 8 else "—"
-        nm = flow.get("north_money")
-        sm = flow.get("south_money")
+    with panel("🔀 北向与南向资金"):
+        flow = cn_stocks.get_northbound_flow()
+        flow_err = flow.get("error")
+        if flow_err:
+            st.warning(f"⚠️ 北向资金数据获取失败：{flow_err}")
+        else:
+            trade_date = flow.get("trade_date") or ""
+            date_label = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}" if len(trade_date) == 8 else "—"
+            nm = flow.get("north_money")   # 北向成交额（亿）
+            hgt = flow.get("hgt")
+            sgt = flow.get("sgt")
 
-        def _flow_card(title, value, date_str):
-            if value is None:
-                color, sign, val_str = "#8ea3bd", "", "暂无"
-            elif value >= 0:
-                color, sign, val_str = "#38f28b", "+", f"{value:.2f}"
-            else:
-                color, sign, val_str = "#ff6257", "", f"{value:.2f}"
-            return f"""
-            <div style="
-                background: rgba(10,16,28,0.88);
-                border: 1px solid rgba(110,170,255,0.14);
-                border-left: 3px solid {color};
-                border-radius: 14px;
-                padding: 1.1rem 1.4rem;
-                display: flex; flex-direction: column; gap: 0.35rem;
-            ">
-                <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">{title}</div>
-                <div style="font-size:2rem;font-weight:700;color:{color};letter-spacing:-0.01em;">{sign}{val_str} <span style="font-size:1rem;font-weight:400;">亿</span></div>
-                <div style="font-size:0.75rem;color:#5a7a9a;">数据日期：{date_str}</div>
-            </div>"""
+            # 北向：近30日成交额 sparkline
+            north_hist_df = load_hsgt_history(days=30)
+            north_hist = north_hist_df["north_money"].tolist() if not north_hist_df.empty else []
+            north_spark = make_sparkline_svg(north_hist, up=True, width=140, height=52)
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown(_flow_card("北向资金净流入", nm, date_label), unsafe_allow_html=True)
-        with c2:
-            st.markdown(_flow_card("南向资金净流入", sm, date_label), unsafe_allow_html=True)
-        with c3:
-            st.markdown(f"""
-            <div style="
-                background: rgba(10,16,28,0.88);
-                border: 1px solid rgba(110,170,255,0.14);
-                border-left: 3px solid rgba(110,170,255,0.4);
-                border-radius: 14px;
-                padding: 1.1rem 1.4rem;
-                display: flex; flex-direction: column; gap: 0.35rem;
-            ">
-                <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">查询时间</div>
-                <div style="font-size:2rem;font-weight:700;color:#7bc7ff;">{datetime.now().strftime("%H:%M:%S")}</div>
-                <div style="font-size:0.75rem;color:#5a7a9a;">最近交易日数据</div>
-            </div>""", unsafe_allow_html=True)
-    close_panel()
+            # 南向：从 ggt_daily 取净买额
+            ggt_latest = load_ggt_net_buy_latest()
+            ggt_err = ggt_latest.get("error")
+            south_net = ggt_latest.get("net_buy")
+            south_buy = ggt_latest.get("buy_amount")
+            south_sell = ggt_latest.get("sell_amount")
+            south_date = ggt_latest.get("trade_date") or ""
+            south_date_label = f"{south_date[:4]}-{south_date[4:6]}-{south_date[6:]}" if len(south_date) == 8 else "—"
 
-    open_panel("📊 主要指数")
-    with st.spinner("加载指数…"):
-        cn_idx = load_cn_index(_tushare_ready=tushare_ok)
-    err = getattr(cn_stocks, "_last_error", None)
-    if err:
-        st.warning(f"⚠️ 指数数据获取失败：{err}")
-    if not cn_idx.empty:
-        cols_show = [c for c in ["名称", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_idx.columns]
-        render_table(cn_idx[cols_show])
-    close_panel()
+            # 南向：近30日净买额柱状图（正绿负红）
+            ggt_hist_df = load_ggt_net_buy_history(days=30)
+            south_hist = ggt_hist_df["net_buy"].tolist() if not ggt_hist_df.empty else []
+            south_bar = make_flow_bar_svg(south_hist, width=140, height=52)
 
-    open_panel("⭐ 自选股")
-    with st.spinner("加载自选股…"):
-        cn_df = load_cn_stocks(_tushare_ready=tushare_ok)
-    if not cn_df.empty:
-        cols_show = [c for c in ["名称", "代码", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_df.columns]
-        render_table(cn_df[cols_show])
-    close_panel()
+            def _fmt_amt(v, unit="亿"):
+                if v is None: return "—"
+                sign = "+" if v >= 0 else ""
+                color = "#38f28b" if v >= 0 else "#ff6257"
+                return f'<span style="color:{color}">{sign}{v:.2f} {unit}</span>'
+
+            def _north_card(nm, hgt, sgt, date_str, spark_svg):
+                val_str = f"{nm:.2f}" if nm is not None else "暂无"
+                color = "#7bc7ff"
+                spark_block = f'<div style="flex-shrink:0;align-self:center;">{spark_svg}</div>' if spark_svg else ""
+                return f"""
+                <div style="background:rgba(6,12,22,0.6);border:1px solid rgba(110,170,255,0.10);
+                    border-left:3px solid {color};border-radius:12px;padding:1.1rem 1.4rem;
+                    display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:1rem;">
+                    <div style="display:flex;flex-direction:column;gap:0.3rem;flex:1;min-width:0;">
+                        <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">北向资金成交额</div>
+                        <div style="font-size:1.8rem;font-weight:700;color:{color};">{val_str} <span style="font-size:0.9rem;font-weight:400;">亿</span></div>
+                        <div style="margin-top:0.3rem;display:flex;flex-direction:column;gap:0.2rem;">
+                            <div style="display:flex;justify-content:space-between;font-size:0.76rem;color:#8ea3bd;">
+                                <span>沪股通</span>{_fmt_amt(hgt)}
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:0.76rem;color:#8ea3bd;">
+                                <span>深股通</span>{_fmt_amt(sgt)}
+                            </div>
+                        </div>
+                        <div style="font-size:0.72rem;color:#5a7a9a;margin-top:0.2rem;">数据日期：{date_str} &nbsp;·&nbsp; 近30日走势</div>
+                    </div>
+                    {spark_block}
+                </div>"""
+
+            def _south_card(net, buy, sell, date_str, bar_svg):
+                if net is None:
+                    net_color, sign, val_str = "#8ea3bd", "", "暂无"
+                elif net >= 0:
+                    net_color, sign, val_str = "#38f28b", "+", f"{net:.2f}"
+                else:
+                    net_color, sign, val_str = "#ff6257", "", f"{net:.2f}"
+                bar_block = f'<div style="flex-shrink:0;align-self:center;">{bar_svg}</div>' if bar_svg else ""
+                buy_fmt = f"{buy:.2f}" if buy is not None else "—"
+                sell_fmt = f"{sell:.2f}" if sell is not None else "—"
+                return f"""
+                <div style="background:rgba(6,12,22,0.6);border:1px solid rgba(110,170,255,0.10);
+                    border-left:3px solid {net_color};border-radius:12px;padding:1.1rem 1.4rem;
+                    display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:1rem;">
+                    <div style="display:flex;flex-direction:column;gap:0.3rem;flex:1;min-width:0;">
+                        <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">南向资金净买额（港股通）</div>
+                        <div style="font-size:1.8rem;font-weight:700;color:{net_color};">{sign}{val_str} <span style="font-size:0.9rem;font-weight:400;">亿</span></div>
+                        <div style="margin-top:0.3rem;display:flex;flex-direction:column;gap:0.2rem;">
+                            <div style="display:flex;justify-content:space-between;font-size:0.76rem;color:#8ea3bd;">
+                                <span>买入</span><span style="color:#38f28b;">{buy_fmt} 亿</span>
+                            </div>
+                            <div style="display:flex;justify-content:space-between;font-size:0.76rem;color:#8ea3bd;">
+                                <span>卖出</span><span style="color:#ff6257;">{sell_fmt} 亿</span>
+                            </div>
+                        </div>
+                        <div style="font-size:0.72rem;color:#5a7a9a;margin-top:0.2rem;">数据日期：{date_str} &nbsp;·&nbsp; 近30日净买柱状图</div>
+                    </div>
+                    {bar_block}
+                </div>"""
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown(_north_card(nm, hgt, sgt, date_label, north_spark), unsafe_allow_html=True)
+            with c2:
+                if ggt_err:
+                    st.warning(f"⚠️ 南向资金数据获取失败：{ggt_err}")
+                else:
+                    st.markdown(_south_card(south_net, south_buy, south_sell, south_date_label, south_bar), unsafe_allow_html=True)
+            with c3:
+                st.markdown(f"""
+                <div style="
+                    background: rgba(6,12,22,0.6);
+                    border: 1px solid rgba(110,170,255,0.10);
+                    border-left: 3px solid rgba(110,170,255,0.4);
+                    border-radius: 12px;
+                    padding: 1.1rem 1.4rem;
+                    display: flex; flex-direction: column; gap: 0.35rem;
+                ">
+                    <div style="font-size:0.78rem;color:#8ea3bd;letter-spacing:0.04em;">查询时间</div>
+                    <div style="font-size:2rem;font-weight:700;color:#7bc7ff;">{datetime.now().strftime("%H:%M:%S")}</div>
+                    <div style="font-size:0.75rem;color:#5a7a9a;">最近交易日数据</div>
+                </div>""", unsafe_allow_html=True)
+
+    with panel("📊 主要指数"):
+        with st.spinner("加载指数…"):
+            cn_idx = load_cn_index(_tushare_ready=tushare_ok)
+        err = getattr(cn_stocks, "_last_error", None)
+        if err:
+            st.warning(f"⚠️ 指数数据获取失败：{err}")
+        if not cn_idx.empty:
+            cols_show = [c for c in ["名称", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_idx.columns]
+            render_table(cn_idx[cols_show])
+
+    with panel("⭐ 自选股"):
+        with st.spinner("加载自选股…"):
+            cn_df = load_cn_stocks(_tushare_ready=tushare_ok)
+        if not cn_df.empty:
+            cols_show = [c for c in ["名称", "代码", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_df.columns]
+            render_table(cn_df[cols_show])
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1560,45 +2638,200 @@ elif page == "🇨🇳 A股":
 elif page == "📦 期货":
     render_hero(
         "期货行情",
-        "把能源、贵金属、工业金属和股指期货放进一个宏观风险偏好面板里。",
+        "国际大宗商品 + 国内主力合约，宏观风险偏好一屏掌握。",
         kicker="Commodities & Futures",
     )
 
-    with st.spinner("加载期货数据…"):
-        fut_df = load_futures()
+    tab_intl, tab_cn = st.tabs(["🌐 国际期货", "🇨🇳 国内期货"])
 
-    if fut_df.empty:
-        st.error("期货数据加载失败，请检查网络连接")
-    else:
-        # 按分类展示
-        for cat in fut_df["分类"].unique():
-            open_panel(cat)
-            sub = fut_df[fut_df["分类"] == cat].copy()
-            cols_show = ["品种", "现价", "涨跌额", "涨跌幅%", "更新时间"]
-            available = [c for c in cols_show if c in sub.columns]
-            render_table(sub[available], price_col="现价")
-            close_panel()
+    with tab_intl:
+        with st.spinner("加载国际期货数据…"):
+            fut_df = load_futures()
 
-        # 期货涨跌条形图
-        open_panel("涨跌幅对比")
-        chart_df = fut_df[["品种", "涨跌幅%"]].copy()
-        chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if float(x) >= 0 else "跌")
-        fig = px.bar(
-            chart_df.sort_values("涨跌幅%"),
-            x="涨跌幅%", y="品种", orientation="h",
-            color="颜色",
-            color_discrete_map={"涨": "#27AE60", "跌": "#E74C3C"},
-            height=max(300, len(chart_df) * 28),
-        )
-        fig.update_layout(
-            margin=dict(l=0, r=0, t=20, b=0),
-            showlegend=False,
-            paper_bgcolor="rgba(255,253,248,0.92)",
-            plot_bgcolor="#fffaf2",
-            font=dict(color="#12212f"),
-        )
-        st.plotly_chart(fig, width='stretch')
-        close_panel()
+        if fut_df.empty:
+            st.error("国际期货数据加载失败，请检查网络连接")
+        else:
+            with panel("国际期货实时行情"):
+                cols_show = ["品种", "现价", "涨跌额", "涨跌幅%", "更新时间"]
+                available = [c for c in cols_show if c in fut_df.columns]
+                df_display = fut_df[["分类"] + available].copy()
+
+                header_cells = "".join(f'<th>{html_lib.escape(c)}</th>' for c in available)
+                rows_html = ""
+                current_cat = None
+                for _, row in df_display.iterrows():
+                    cat = row["分类"]
+                    if cat != current_cat:
+                        current_cat = cat
+                        rows_html += (
+                            f'<tr style="background:rgba(73,198,255,0.08);">'
+                            f'<td colspan="{len(available)}" style="color:#49c6ff;font-weight:600;'
+                            f'font-size:0.8rem;padding:0.5rem 1rem;letter-spacing:0.06em;">'
+                            f'{html_lib.escape(cat)}</td></tr>'
+                        )
+                    cells = ""
+                    for col in available:
+                        val = row[col]
+                        cell_style = ""
+                        display = html_lib.escape(str(val))
+                        if col == "涨跌幅%":
+                            try:
+                                v = float(val)
+                                if v > 0:
+                                    cell_style = "color:#38f28b;font-weight:600;"
+                                    display = f"+{v:.2f}%"
+                                elif v < 0:
+                                    cell_style = "color:#ff6257;font-weight:600;"
+                                    display = f"{v:.2f}%"
+                                else:
+                                    cell_style = "color:#8ea3bd;"
+                                    display = f"{v:.2f}%"
+                            except Exception:
+                                pass
+                        elif col == "现价":
+                            cell_style = "color:#eaf2ff;font-weight:600;font-variant-numeric:tabular-nums;"
+                        elif col == "涨跌额":
+                            try:
+                                v = float(val)
+                                cell_style = "color:#38f28b;" if v > 0 else ("color:#ff6257;" if v < 0 else "color:#8ea3bd;")
+                                display = f"+{v:.2f}" if v > 0 else f"{v:.2f}"
+                            except Exception:
+                                pass
+                        cells += f'<td style="{cell_style}">{display}</td>'
+                    rows_html += f"<tr>{cells}</tr>"
+
+                st.markdown(f"""
+                <div style="overflow-x:auto;border-radius:12px;border:1px solid rgba(110,170,255,0.12);background:rgba(10,16,28,0.7);">
+                <table style="width:100%;border-collapse:collapse;font-size:0.88rem;color:#c8d8ea;">
+                    <thead>
+                        <tr style="border-bottom:1px solid rgba(110,170,255,0.18);background:rgba(73,198,255,0.05);">
+                            {header_cells}
+                        </tr>
+                    </thead>
+                    <tbody>{rows_html}</tbody>
+                </table>
+                </div>
+                <style>
+                table td, table th {{ padding:0.6rem 1rem; text-align:left; white-space:nowrap; }}
+                table th {{ font-size:0.75rem; font-weight:500; color:#5a7a9a; letter-spacing:0.05em; text-transform:uppercase; }}
+                table tbody tr {{ border-bottom:1px solid rgba(110,170,255,0.06); transition:background 0.15s; }}
+                table tbody tr:hover {{ background:rgba(73,198,255,0.05); }}
+                </style>
+                """, unsafe_allow_html=True)
+
+            with panel("涨跌幅对比"):
+                chart_df = fut_df[["品种", "涨跌幅%"]].copy()
+                chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if float(x) >= 0 else "跌")
+                fig = px.bar(
+                    chart_df.sort_values("涨跌幅%"),
+                    x="涨跌幅%", y="品种", orientation="h",
+                    color="颜色",
+                    color_discrete_map={"涨": "#38f28b", "跌": "#ff6257"},
+                    height=max(300, len(chart_df) * 28),
+                )
+                fig.update_layout(
+                    margin=dict(l=0, r=0, t=20, b=0),
+                    showlegend=False,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#dfe9f8"),
+                )
+                st.plotly_chart(fig, width='stretch')
+
+    with tab_cn:
+        with st.spinner("加载国内期货数据…"):
+            cn_fut_df = load_cn_futures()
+
+        if cn_fut_df.empty:
+            st.warning("国内期货数据暂时无法获取，请确认已安装 akshare（`pip install akshare`）并检查网络连接。")
+        else:
+            with panel("国内期货实时行情"):
+                cols_show = ["品种", "现价", "涨跌额", "涨跌幅%", "成交量(万手)", "更新时间"]
+                available = [c for c in cols_show if c in cn_fut_df.columns]
+                df_display = cn_fut_df[["分类"] + available].copy()
+
+                # 构建带分类标题行的统一 HTML 表格
+                header_cells = "".join(f'<th>{html_lib.escape(c)}</th>' for c in available)
+                rows_html = ""
+                current_cat = None
+                for _, row in df_display.iterrows():
+                    cat = row["分类"]
+                    if cat != current_cat:
+                        current_cat = cat
+                        rows_html += (
+                            f'<tr style="background:rgba(73,198,255,0.08);">'
+                            f'<td colspan="{len(available)}" style="color:#49c6ff;font-weight:600;'
+                            f'font-size:0.8rem;padding:0.5rem 1rem;letter-spacing:0.06em;">'
+                            f'{html_lib.escape(cat)}</td></tr>'
+                        )
+                    cells = ""
+                    for col in available:
+                        val = row[col]
+                        cell_style = ""
+                        display = html_lib.escape(str(val))
+                        if col == "涨跌幅%":
+                            try:
+                                v = float(val)
+                                if v > 0:
+                                    cell_style = "color:#38f28b;font-weight:600;"
+                                    display = f"+{v:.2f}%"
+                                elif v < 0:
+                                    cell_style = "color:#ff6257;font-weight:600;"
+                                    display = f"{v:.2f}%"
+                                else:
+                                    cell_style = "color:#8ea3bd;"
+                                    display = f"{v:.2f}%"
+                            except Exception:
+                                pass
+                        elif col == "现价":
+                            cell_style = "color:#eaf2ff;font-weight:600;font-variant-numeric:tabular-nums;"
+                        elif col == "涨跌额":
+                            try:
+                                v = float(val)
+                                cell_style = "color:#38f28b;" if v > 0 else ("color:#ff6257;" if v < 0 else "color:#8ea3bd;")
+                                display = f"+{v:.2f}" if v > 0 else f"{v:.2f}"
+                            except Exception:
+                                pass
+                        cells += f'<td style="{cell_style}">{display}</td>'
+                    rows_html += f"<tr>{cells}</tr>"
+
+                st.markdown(f"""
+                <div style="overflow-x:auto;border-radius:12px;border:1px solid rgba(110,170,255,0.12);background:rgba(10,16,28,0.7);">
+                <table style="width:100%;border-collapse:collapse;font-size:0.88rem;color:#c8d8ea;">
+                    <thead>
+                        <tr style="border-bottom:1px solid rgba(110,170,255,0.18);background:rgba(73,198,255,0.05);">
+                            {header_cells}
+                        </tr>
+                    </thead>
+                    <tbody>{rows_html}</tbody>
+                </table>
+                </div>
+                <style>
+                table td, table th {{ padding:0.6rem 1rem; text-align:left; white-space:nowrap; }}
+                table th {{ font-size:0.75rem; font-weight:500; color:#5a7a9a; letter-spacing:0.05em; text-transform:uppercase; }}
+                table tbody tr {{ border-bottom:1px solid rgba(110,170,255,0.06); transition:background 0.15s; }}
+                table tbody tr:hover {{ background:rgba(73,198,255,0.05); }}
+                </style>
+                """, unsafe_allow_html=True)
+
+            with panel("涨跌幅对比"):
+                chart_df = cn_fut_df[["品种", "涨跌幅%"]].copy()
+                chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if float(x) >= 0 else "跌")
+                fig = px.bar(
+                    chart_df.sort_values("涨跌幅%"),
+                    x="涨跌幅%", y="品种", orientation="h",
+                    color="颜色",
+                    color_discrete_map={"涨": "#38f28b", "跌": "#ff6257"},
+                    height=max(300, len(chart_df) * 28),
+                )
+                fig.update_layout(
+                    margin=dict(l=0, r=0, t=20, b=0),
+                    showlegend=False,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#dfe9f8"),
+                )
+                st.plotly_chart(fig, width='stretch')
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1611,45 +2844,44 @@ elif page == "📊 K线图表":
         kicker="Chart Desk",
     )
 
-    open_panel("图表设置")
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        market = st.selectbox("市场", ["美股", "期货（国际）"])
-    with col2:
-        if market == "美股":
-            symbol = st.selectbox("标的", config.MY_US_WATCHLIST)
-        else:
-            fut_options = {name: sym for sym, name in futures.get_all_symbols()}
-            name_sel = st.selectbox("标的", list(fut_options.keys()))
-            symbol = fut_options[name_sel]
-    with col3:
-        period_map = {
-            "1天": ("1d", "5m"),
-            "1个月": ("1mo", "1d"),
-            "3个月": ("3mo", "1d"),
-            "6个月": ("6mo", "1d"),
-            "1年": ("1y", "1d"),
-            "2年": ("2y", "1d"),
-            "5年": ("5y", "1d"),
-            "全部": ("max", "1d"),
-        }
-        period_sel = st.selectbox("查看区间", list(period_map.keys()), index=5)
+    with panel("图表设置"):
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            market = st.selectbox("市场", ["美股", "期货（国际）"])
+        with col2:
+            if market == "美股":
+                symbol = st.selectbox("标的", get_us_watchlist())
+            else:
+                fut_options = {name: sym for sym, name in futures.get_all_symbols()}
+                name_sel = st.selectbox("标的", list(fut_options.keys()))
+                symbol = fut_options[name_sel]
+        with col3:
+            period_map = {
+                "1天": ("1d", "5m"),
+                "1个月": ("1mo", "1d"),
+                "3个月": ("3mo", "1d"),
+                "6个月": ("6mo", "1d"),
+                "1年": ("1y", "1d"),
+                "2年": ("2y", "1d"),
+                "5年": ("5y", "1d"),
+                "全部": ("max", "1d"),
+            }
+            period_sel = st.selectbox("查看K线数据区间", list(period_map.keys()), index=5)
 
-    with st.spinner("加载K线数据…"):
-        period_value, interval_value = period_map[period_sel]
-        if market == "美股":
-            hist = load_us_history(symbol, period_value, interval_value)
-            title = symbol
-        else:
-            hist = load_futures_history(symbol, period_value, interval_value)
-            title = name_sel if market == "期货（国际）" else symbol
+        with st.spinner("加载K线数据…"):
+            period_value, interval_value = period_map[period_sel]
+            if market == "美股":
+                hist = load_us_history(symbol, period_value, interval_value)
+                title = symbol
+            else:
+                hist = load_futures_history(symbol, period_value, interval_value)
+                title = name_sel if market == "期货（国际）" else symbol
 
-    render_kline(hist, f"{title} — {period_sel}")
+        render_kline(hist, f"{title} — {period_sel}")
 
-    if not hist.empty:
-        with st.expander("查看原始数据"):
-            render_table(hist.tail(30).reset_index(), pct_col="")
-    close_panel()
+        if not hist.empty:
+            with st.expander("查看原始数据"):
+                render_table(hist.tail(30).reset_index(), pct_col="")
 
 
 # ─── 页脚 ──────────────────────────────────────────────────────────

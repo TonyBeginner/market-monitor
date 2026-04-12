@@ -17,10 +17,11 @@ except ImportError:
 DEFAULT_CN_STOCKS = {
     "指数": [
         ("000001.SH", "上证综指"),
-        ("399001.SZ", "深证成指"),
+        ("000300.SH", "沪深300(IF)"),
+        ("000905.SH", "中证500(IC)"),
+        ("000852.SH", "中证1000(IM)"),
+        ("000016.SH", "上证50(IH)"),
         ("399006.SZ", "创业板指"),
-        ("000300.SH", "沪深300"),
-        ("000905.SH", "中证500"),
     ],
     "白马股": [
         ("600519.SH", "贵州茅台"),
@@ -165,9 +166,10 @@ def get_history(ts_code: str, start: str = None, end: str = None) -> pd.DataFram
             from dateutil.relativedelta import relativedelta
             start = (date.today() - relativedelta(months=6)).strftime("%Y%m%d")
 
-        # 区分指数和个股
+        # 区分指数和个股：优先按内置指数名单判断，避免 000905.SH 等被误判为股票
+        index_codes = {code for code, _ in DEFAULT_CN_STOCKS["指数"]}
         if ts_code.endswith(".SH") or ts_code.endswith(".SZ"):
-            if ts_code.startswith("0000") or ts_code.startswith("3990"):
+            if ts_code in index_codes or ts_code.startswith("399"):
                 df = _pro.index_daily(ts_code=ts_code, start_date=start, end_date=end)
             else:
                 df = _pro.daily(ts_code=ts_code, start_date=start, end_date=end)
@@ -203,9 +205,14 @@ def get_northbound_flow() -> dict:
         # 取最近一个交易日
         df = df.sort_values("trade_date", ascending=False)
         row = df.iloc[0]
+        def _yi(key): return round(float(row.get(key) or 0) / 1e4, 2)
         return {
-            "north_money": round(float(row.get("north_money") or 0) / 1e4, 2),
-            "south_money": round(float(row.get("south_money") or 0) / 1e4, 2),
+            "north_money": _yi("north_money"),
+            "south_money": _yi("south_money"),
+            "hgt":  _yi("hgt"),
+            "sgt":  _yi("sgt"),
+            "ggt_ss": _yi("ggt_ss"),
+            "ggt_sz": _yi("ggt_sz"),
             "trade_date": str(row.get("trade_date", "")),
             "error": None,
         }
@@ -214,6 +221,75 @@ def get_northbound_flow() -> dict:
         print(f"[CN] 北向资金获取失败: {e}")
         print(traceback.format_exc())
         return {"north_money": None, "south_money": None, "trade_date": None, "error": str(e)}
+
+
+def get_hsgt_flow_history(days: int = 30) -> pd.DataFrame:
+    """获取北向资金近 N 日成交额历史（返回 trade_date, north_money，单位亿）"""
+    if not TUSHARE_AVAILABLE or _pro is None:
+        return pd.DataFrame()
+    try:
+        end = date.today().strftime("%Y%m%d")
+        from datetime import timedelta
+        start = (date.today() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        df = _pro.moneyflow_hsgt(start_date=start, end_date=end)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.sort_values("trade_date").tail(days)
+        for col in ["north_money", "hgt", "sgt"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce") / 1e4
+        return df[["trade_date", "north_money", "hgt", "sgt"]].reset_index(drop=True)
+    except Exception as e:
+        print(f"[CN] 北向成交历史获取失败: {e}")
+        return pd.DataFrame()
+
+
+def get_ggt_net_buy_latest() -> dict:
+    """获取南向资金最新一日净买额（买入-卖出，单位：亿元）"""
+    if not TUSHARE_AVAILABLE or _pro is None:
+        return {"net_buy": None, "buy_amount": None, "sell_amount": None, "trade_date": None, "error": "Tushare 未初始化"}
+    try:
+        end = date.today().strftime("%Y%m%d")
+        from datetime import timedelta
+        start = (date.today() - timedelta(days=10)).strftime("%Y%m%d")
+        df = _pro.ggt_daily(start_date=start, end_date=end)
+        if df is None or df.empty:
+            return {"net_buy": None, "buy_amount": None, "sell_amount": None, "trade_date": None, "error": "API 返回空数据"}
+        df = df.sort_values("trade_date", ascending=False)
+        row = df.iloc[0]
+        buy = round(float(row.get("buy_amount") or 0), 2)
+        sell = round(float(row.get("sell_amount") or 0), 2)
+        net = round(buy - sell, 2)
+        return {
+            "net_buy": net,
+            "buy_amount": buy,
+            "sell_amount": sell,
+            "trade_date": str(row.get("trade_date", "")),
+            "error": None,
+        }
+    except Exception as e:
+        print(f"[CN] 南向净买额获取失败: {e}")
+        return {"net_buy": None, "buy_amount": None, "sell_amount": None, "trade_date": None, "error": str(e)}
+
+
+def get_ggt_net_buy_history(days: int = 30) -> pd.DataFrame:
+    """获取南向资金近 N 日净买额历史（buy_amount - sell_amount，单位亿元）"""
+    if not TUSHARE_AVAILABLE or _pro is None:
+        return pd.DataFrame()
+    try:
+        end = date.today().strftime("%Y%m%d")
+        from datetime import timedelta
+        start = (date.today() - timedelta(days=days * 2)).strftime("%Y%m%d")
+        df = _pro.ggt_daily(start_date=start, end_date=end)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.sort_values("trade_date").tail(days)
+        df["buy_amount"] = pd.to_numeric(df["buy_amount"], errors="coerce")
+        df["sell_amount"] = pd.to_numeric(df["sell_amount"], errors="coerce")
+        df["net_buy"] = df["buy_amount"] - df["sell_amount"]
+        return df[["trade_date", "net_buy", "buy_amount", "sell_amount"]].reset_index(drop=True)
+    except Exception as e:
+        print(f"[CN] 南向净买历史获取失败: {e}")
+        return pd.DataFrame()
 
 
 def _get_mock_index_data() -> pd.DataFrame:
