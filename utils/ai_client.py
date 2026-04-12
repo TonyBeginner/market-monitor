@@ -3,6 +3,8 @@
 """
 from __future__ import annotations
 
+import base64
+import mimetypes
 import time
 
 
@@ -67,3 +69,47 @@ def _claude(prompt: str, system: str, api_key: str, max_tokens: int) -> str:
     if system:
         kwargs["system"] = system
     return client.messages.create(**kwargs).content[0].text.strip()
+
+
+def image_chat(
+    prompt: str,
+    image_bytes: bytes,
+    mime_type: str = "image/png",
+    system: str = "",
+    api_key_claude: str = "",
+    max_tokens: int = 2048,
+) -> str:
+    """使用 Claude 视觉能力识别图片内容。"""
+    if not api_key_claude:
+        raise RuntimeError("未配置 Claude API Key，无法识别截图。")
+
+    import anthropic
+
+    media_type = mime_type or "image/png"
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    client = anthropic.Anthropic(api_key=api_key_claude)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        system=system or "",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": encoded}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    )
+    texts = []
+    for item in message.content:
+        text = getattr(item, "text", "")
+        if text:
+            texts.append(text)
+    return "\n".join(texts).strip()
+
+
+def guess_mime_type(filename: str, fallback: str = "image/png") -> str:
+    mime_type, _ = mimetypes.guess_type(filename or "")
+    return mime_type or fallback

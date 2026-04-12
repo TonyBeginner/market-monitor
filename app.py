@@ -9,6 +9,7 @@ import plotly.express as px
 from datetime import datetime
 import base64
 import html as html_lib
+import json
 from urllib.parse import quote
 import time
 import sys
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import config
 from collectors import us_stocks, cn_stocks, futures, telegram_feed
 from agents import morning_brief as ai_brief
-from utils import github_store, disk_cache
+from utils import ai_client, github_store, disk_cache
 from utils import watchlist_store
 
 # ─── 页面配置 ─────────────────────────────────────────────────────
@@ -474,6 +475,40 @@ def _disk_or_fetch(key: str, fetch_fn):
 def get_us_watchlist() -> list[str]:
     return watchlist_store.get_watchlist("us", config.MY_US_WATCHLIST)
 
+
+def get_cn_watchlist() -> list[str]:
+    return watchlist_store.get_watchlist("cn", config.MY_CN_WATCHLIST)
+
+
+def get_intl_futures_watchlist() -> list[str]:
+    return watchlist_store.get_watchlist("intl_futures", [])
+
+
+def get_cn_futures_watchlist() -> list[str]:
+    return watchlist_store.get_watchlist("cn_futures", [])
+
+
+def get_positions() -> list[dict]:
+    return watchlist_store.get_positions()
+
+
+WATCHLIST_DEFAULTS = {
+    "us": config.MY_US_WATCHLIST,
+    "cn": config.MY_CN_WATCHLIST,
+    "intl_futures": [],
+    "cn_futures": [],
+}
+
+MARKET_CONFIG = {
+    "us": {"label": "美国股票", "asset_type": "us_stock", "symbol_col": "代码", "name_col": "名称"},
+    "cn": {"label": "中国股票", "asset_type": "cn_stock", "symbol_col": "代码", "name_col": "名称"},
+    "intl_futures": {"label": "国际期货", "asset_type": "intl_future", "symbol_col": "代码", "name_col": "品种"},
+    "cn_futures": {"label": "国内期货", "asset_type": "cn_future", "symbol_col": "品种", "name_col": "品种"},
+}
+
+MARKET_LABEL_TO_KEY = {meta["label"]: key for key, meta in MARKET_CONFIG.items()}
+MARKET_KEY_TO_LABEL = {key: meta["label"] for key, meta in MARKET_CONFIG.items()}
+
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_us_data(watchlist: tuple[str, ...], _version: str = "v3_user_watchlist"):
     watch_key = "_".join(watchlist) if watchlist else "empty"
@@ -494,12 +529,45 @@ def load_cn_stocks(_tushare_ready: bool = False):
     return _disk_or_fetch("cn_stocks", lambda: cn_stocks.get_stock_quote(config.MY_CN_WATCHLIST))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_cn_watchlist_data(watchlist: tuple[str, ...], _tushare_ready: bool = False):
+    watch_key = "_".join(watchlist) if watchlist else "empty"
+    return _disk_or_fetch(f"cn_watch_{watch_key}", lambda: cn_stocks.get_stock_quote(list(watchlist)))
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_futures():
     return _disk_or_fetch("intl_futures", lambda: futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_intl_futures_watchlist_data(watchlist: tuple[str, ...]):
+    watch_key = "_".join(watchlist) if watchlist else "empty"
+
+    def _fetch():
+        df = futures.get_intl_futures_quote()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if not watchlist:
+            return df.iloc[0:0].copy()
+        return df[df["代码"].isin(list(watchlist))].reset_index(drop=True)
+
+    return _disk_or_fetch(f"intl_fut_watch_{watch_key}", _fetch)
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_futures():
     return _disk_or_fetch("cn_futures", futures.get_cn_futures_quote)
+
+@st.cache_data(ttl=config.REFRESH_INTERVAL)
+def load_cn_futures_watchlist_data(watchlist: tuple[str, ...]):
+    watch_key = "_".join(watchlist) if watchlist else "empty"
+
+    def _fetch():
+        df = futures.get_cn_futures_quote()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if not watchlist:
+            return df.iloc[0:0].copy()
+        return df[df["品种"].isin(list(watchlist))].reset_index(drop=True)
+
+    return _disk_or_fetch(f"cn_fut_watch_{watch_key}", _fetch)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_sector_performance():
@@ -686,6 +754,215 @@ def load_ggt_net_buy_latest() -> dict:
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_ggt_net_buy_history(days: int = 30) -> "pd.DataFrame":
     return cn_stocks.get_ggt_net_buy_history(days=days)
+
+
+def open_asset_detail(symbol: str, name: str, asset_type: str):
+    st.session_state["selected_asset"] = {
+        "symbol": symbol,
+        "name": name,
+        "type": asset_type,
+    }
+    st.session_state["detail_request_id"] = st.session_state.get("detail_request_id", 0) + 1
+
+
+def get_market_key_from_label(label: str) -> str:
+    return MARKET_LABEL_TO_KEY.get(label, "us")
+
+
+def get_market_asset_type(market_key: str) -> str:
+    return MARKET_CONFIG.get(market_key, {}).get("asset_type", "")
+
+
+def get_market_watchlists() -> dict[str, list[str]]:
+    return watchlist_store.get_all_watchlists(WATCHLIST_DEFAULTS)
+
+
+def parse_symbol_input(raw_text: str, uppercase: bool = True) -> list[str]:
+    normalized = (
+        str(raw_text or "")
+        .replace("，", ",")
+        .replace("、", ",")
+        .replace("\n", ",")
+        .replace(" ", ",")
+    )
+    symbols = []
+    for item in normalized.split(","):
+        cleaned = item.strip()
+        if not cleaned:
+            continue
+        symbols.append(cleaned.upper() if uppercase else cleaned)
+    return symbols
+
+
+def get_market_data(market_key: str, symbols: list[str]) -> pd.DataFrame:
+    symbols = [str(item).strip() for item in symbols if str(item).strip()]
+    if market_key == "us":
+        return load_us_data(tuple([item.upper() for item in symbols]))
+    if market_key == "cn":
+        return load_cn_watchlist_data(tuple(symbols), _tushare_ready=tushare_ok)
+    if market_key == "intl_futures":
+        return load_intl_futures_watchlist_data(tuple(symbols))
+    if market_key == "cn_futures":
+        return load_cn_futures_watchlist_data(tuple(symbols))
+    return pd.DataFrame()
+
+
+def build_watchlist_market_frame(market_key: str, symbols: list[str]) -> pd.DataFrame:
+    df = get_market_data(market_key, symbols)
+    market_label = MARKET_KEY_TO_LABEL.get(market_key, market_key)
+    name_col = MARKET_CONFIG[market_key]["name_col"]
+    symbol_col = MARKET_CONFIG[market_key]["symbol_col"]
+    if df is None or df.empty:
+        fallback_rows = []
+        for symbol in symbols:
+            fallback_rows.append(
+                {
+                    "市场": market_label,
+                    "资产名称": symbol,
+                    "资产代码": symbol,
+                    "现价": "",
+                    "涨跌额": "",
+                    "涨跌幅%": "",
+                    "更新时间": "",
+                    "asset_symbol": symbol,
+                    "asset_name": symbol,
+                    "asset_type": get_market_asset_type(market_key),
+                }
+            )
+        return pd.DataFrame(fallback_rows)
+
+    out = df.copy()
+    out["市场"] = market_label
+    out["资产名称"] = out[name_col]
+    out["资产代码"] = out[symbol_col]
+    out["asset_symbol"] = out[symbol_col]
+    out["asset_name"] = out[name_col]
+    out["asset_type"] = get_market_asset_type(market_key)
+    return out
+
+
+def build_total_watchlist_frame(watchlists: dict[str, list[str]]) -> pd.DataFrame:
+    frames = []
+    for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
+        symbols = watchlists.get(market_key, [])
+        if not symbols:
+            continue
+        df = build_watchlist_market_frame(market_key, symbols)
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def get_position_quote_row(position: dict) -> dict:
+    market_key = get_market_key_from_label(position.get("market", ""))
+    symbol = str(position.get("symbol", "")).strip()
+    if not symbol:
+        return {}
+    df = get_market_data(market_key, [symbol])
+    if df is None or df.empty:
+        return {}
+    config_meta = MARKET_CONFIG[market_key]
+    symbol_col = config_meta["symbol_col"]
+    name_col = config_meta["name_col"]
+    row = df.iloc[0].to_dict()
+    row["asset_symbol"] = row.get(symbol_col, symbol)
+    row["asset_name"] = row.get(name_col, position.get("name", symbol))
+    row["asset_type"] = config_meta["asset_type"]
+    return row
+
+
+def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
+    rows = []
+    for idx, position in enumerate(positions):
+        quote_row = get_position_quote_row(position)
+        current_price = pd.to_numeric(quote_row.get("现价"), errors="coerce")
+        quantity = pd.to_numeric(position.get("quantity"), errors="coerce")
+        cost = pd.to_numeric(position.get("cost"), errors="coerce")
+        if pd.isna(quantity):
+            quantity = 0.0
+        if pd.isna(cost):
+            cost = 0.0
+        market_label = position.get("market", "")
+        symbol = position.get("symbol", "")
+        name = position.get("name") or quote_row.get("asset_name") or symbol
+        market_key = get_market_key_from_label(market_label)
+        asset_type = get_market_asset_type(market_key)
+        cost_amount = float(quantity) * float(cost)
+        current_amount = float(quantity) * float(current_price) if pd.notna(current_price) else None
+        pnl_amount = current_amount - cost_amount if current_amount is not None else None
+        pnl_pct = (pnl_amount / cost_amount * 100) if cost_amount and pnl_amount is not None else None
+        rows.append(
+            {
+                "index": idx,
+                "市场": market_label,
+                "代码": symbol,
+                "名称": name,
+                "持仓数量": float(quantity),
+                "持仓成本": float(cost),
+                "现价": round(float(current_price), 4) if pd.notna(current_price) else "",
+                "持仓市值": round(current_amount, 2) if current_amount is not None else "",
+                "浮盈亏": round(pnl_amount, 2) if pnl_amount is not None else "",
+                "浮盈亏%": round(pnl_pct, 2) if pnl_pct is not None else "",
+                "asset_symbol": symbol,
+                "asset_name": name,
+                "asset_type": asset_type,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def extract_json_block(text: str) -> str:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if "\n" in raw:
+            raw = raw.split("\n", 1)[1]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return raw[start:end + 1]
+    return raw
+
+
+def recognize_import_from_image(uploaded_file, mode: str) -> list[dict]:
+    prompt_map = {
+        "watchlist": """
+请识别这张交易软件截图里的自选资产，返回严格 JSON，不要输出解释。
+JSON 格式：
+{"items":[{"market":"美国股票|中国股票|国际期货|国内期货","symbol":"代码","name":"名称"}]}
+要求：
+1. 只保留截图中明确可见的资产行。
+2. symbol 尽量输出标准代码；中国股票保留 ts_code 格式，如 600519.SH。
+3. 国内期货如果无法确认代码，可用常见品种名作为 symbol。
+4. 无法判断的字段用空字符串，不要编造。
+""",
+        "positions": """
+请识别这张持仓截图里的持仓资产，返回严格 JSON，不要输出解释。
+JSON 格式：
+{"items":[{"market":"美国股票|中国股票|国际期货|国内期货","symbol":"代码","name":"名称","quantity":0,"cost":0}]}
+要求：
+1. quantity 输出数字。
+2. cost 输出持仓成本单价数字。
+3. 只保留截图中明确可见的持仓行。
+4. 无法判断的字段用空字符串或 0，不要编造。
+""",
+    }
+    text = ai_client.image_chat(
+        prompt=prompt_map[mode],
+        image_bytes=uploaded_file.getvalue(),
+        mime_type=ai_client.guess_mime_type(uploaded_file.name),
+        api_key_claude=config.CLAUDE_API_KEY,
+        max_tokens=2500,
+    )
+    payload = json.loads(extract_json_block(text) or "{}")
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return items
 
 def make_flow_bar_svg(values: list, width: int = 200, height: int = 50) -> str:
     """生成资金流柱状图，正值自 0 轴向上，负值自 0 轴向下。"""
@@ -1691,6 +1968,7 @@ def show_asset_detail(symbol: str, display_name: str, asset_type: str = "us_stoc
     type_label_map = {
         "us_stock": "美股",
         "us_index": "美股指数",
+        "cn_stock": "A股",
         "cn_index": "A股指数",
         "intl_future": "国际期货",
         "cn_future": "国内期货",
@@ -1700,6 +1978,8 @@ def show_asset_detail(symbol: str, display_name: str, asset_type: str = "us_stoc
     with st.spinner("加载K线数据…"):
         if asset_type in ("us_stock", "us_index"):
             hist = load_us_history(symbol, "6mo")
+        elif asset_type == "cn_stock":
+            hist = load_cn_history(symbol)
         elif asset_type == "intl_future":
             hist = load_futures_history(symbol, "6mo")
         elif asset_type == "cn_index":
@@ -1964,6 +2244,265 @@ def render_metrics_row(df: pd.DataFrame, name_col: str, price_col: str, pct_col:
                     st.rerun()
 
 
+def render_watchlist_row_actions(df: pd.DataFrame, market_key: str, key_prefix: str):
+    if df is None or df.empty:
+        st.info("当前市场还没有自选资产。")
+        return
+
+    headers = st.columns([1.2, 1.1, 1, 1, 1, 1.2])
+    for col, label in zip(headers, ["名称", "代码", "现价", "涨跌幅", "更新时间", "操作"]):
+        col.markdown(f"**{label}**")
+
+    pending_key = f"{key_prefix}_pending_delete"
+    current_watchlist = get_market_watchlists().get(market_key, [])
+    meta = MARKET_CONFIG[market_key]
+
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        row_cols = st.columns([1.2, 1.1, 1, 1, 1, 1.2])
+        symbol = str(row.get("代码", "")).strip()
+        name = str(row.get("名称", symbol))
+        pct_val = pd.to_numeric(row.get("涨跌幅"), errors="coerce")
+        pct_text = ""
+        if pd.notna(pct_val):
+            pct_text = f"{pct_val:+.2f}%"
+
+        with row_cols[0]:
+            if st.button(name, key=f"{key_prefix}_name_{market_key}_{symbol}_{row_idx}", use_container_width=True):
+                open_asset_detail(symbol, name, meta["asset_type"])
+                st.rerun()
+        row_cols[1].markdown(symbol or "-")
+        row_cols[2].markdown(str(row.get("现价", "-")))
+        row_cols[3].markdown(pct_text or str(row.get("涨跌幅", "-")))
+        row_cols[4].markdown(str(row.get("更新时间", row.get("更新时", "-"))))
+
+        with row_cols[5]:
+            if st.session_state.get(pending_key) == symbol:
+                confirm_cols = st.columns(2)
+                with confirm_cols[0]:
+                    if st.button("确认删除", key=f"{key_prefix}_confirm_{market_key}_{symbol}_{row_idx}", use_container_width=True):
+                        updated = [item for item in current_watchlist if item != symbol]
+                        watchlist_store.save_watchlist(market_key, updated)
+                        st.session_state.pop(pending_key, None)
+                        st.cache_data.clear()
+                        st.rerun()
+                with confirm_cols[1]:
+                    if st.button("取消", key=f"{key_prefix}_cancel_{market_key}_{symbol}_{row_idx}", use_container_width=True):
+                        st.session_state.pop(pending_key, None)
+                        st.rerun()
+            else:
+                if st.button("删除", key=f"{key_prefix}_delete_{market_key}_{symbol}_{row_idx}", use_container_width=True):
+                    st.session_state[pending_key] = symbol
+                    st.rerun()
+
+        st.markdown('<div style="height:1px;background:rgba(110,170,255,0.06);margin:0.12rem 0 0.18rem 0;"></div>', unsafe_allow_html=True)
+
+
+def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_prefix: str = "positions"):
+    if df is None or df.empty:
+        st.info("当前还没有持仓资产。")
+        return
+
+    headers = st.columns([1.1, 0.9, 1.1, 0.9, 0.9, 0.8, 0.9, 0.9, 1.4])
+    for col, label in zip(headers, ["市场", "代码", "名称", "数量", "成本", "现价", "浮盈亏", "浮盈亏%", "操作"]):
+        col.markdown(f"**{label}**")
+
+    edit_key = f"{key_prefix}_editing_index"
+    delete_key = f"{key_prefix}_pending_delete"
+
+    for row_idx, row in df.iterrows():
+        cols = st.columns([1.1, 0.9, 1.1, 0.9, 0.9, 0.8, 0.9, 0.9, 1.4])
+        asset_index = int(row["index"])
+        symbol = str(row["代码"])
+        name = str(row["名称"])
+        asset_type = str(row["asset_type"])
+
+        cols[0].markdown(str(row["市场"]))
+        cols[1].markdown(symbol)
+        with cols[2]:
+            if st.button(name, key=f"{key_prefix}_detail_{asset_index}_{row_idx}", use_container_width=True):
+                open_asset_detail(symbol, name, asset_type)
+                st.rerun()
+        cols[3].markdown(f'{float(row["持仓数量"]):g}')
+        cols[4].markdown(f'{float(row["持仓成本"]):g}')
+        cols[5].markdown(str(row.get("现价", "")))
+        cols[6].markdown(str(row.get("浮盈亏", "")))
+        cols[7].markdown(f'{row["浮盈亏%"]:+.2f}%' if pd.notna(pd.to_numeric(row.get("浮盈亏%"), errors="coerce")) and str(row.get("浮盈亏%")) != "" else "")
+
+        with cols[8]:
+            if st.session_state.get(delete_key) == asset_index:
+                action_cols = st.columns(2)
+                with action_cols[0]:
+                    if st.button("确认删", key=f"{key_prefix}_confirm_delete_{asset_index}_{row_idx}", use_container_width=True):
+                        watchlist_store.delete_position(asset_index)
+                        st.session_state.pop(delete_key, None)
+                        st.cache_data.clear()
+                        st.rerun()
+                with action_cols[1]:
+                    if st.button("取消", key=f"{key_prefix}_cancel_delete_{asset_index}_{row_idx}", use_container_width=True):
+                        st.session_state.pop(delete_key, None)
+                        st.rerun()
+            else:
+                action_cols = st.columns(2)
+                with action_cols[0]:
+                    if st.button("修改", key=f"{key_prefix}_edit_{asset_index}_{row_idx}", use_container_width=True):
+                        st.session_state[edit_key] = asset_index
+                        st.rerun()
+                with action_cols[1]:
+                    if st.button("删除", key=f"{key_prefix}_delete_{asset_index}_{row_idx}", use_container_width=True):
+                        st.session_state[delete_key] = asset_index
+                        st.rerun()
+
+        if st.session_state.get(edit_key) == asset_index:
+            original = positions[asset_index]
+            with st.container(border=True):
+                st.caption(f"编辑持仓: {name} ({symbol})")
+                edit_cols = st.columns(4)
+                new_market = edit_cols[0].selectbox(
+                    "市场",
+                    list(MARKET_LABEL_TO_KEY.keys()),
+                    index=max(0, list(MARKET_LABEL_TO_KEY.keys()).index(original.get("market", "美国股票")) if original.get("market", "美国股票") in MARKET_LABEL_TO_KEY else 0),
+                    key=f"{key_prefix}_market_{asset_index}",
+                )
+                new_symbol = edit_cols[1].text_input("代码", value=str(original.get("symbol", "")), key=f"{key_prefix}_symbol_{asset_index}")
+                new_quantity = edit_cols[2].number_input("持仓数量", value=float(original.get("quantity", 0) or 0), min_value=0.0, step=1.0, key=f"{key_prefix}_qty_{asset_index}")
+                new_cost = edit_cols[3].number_input("持仓成本", value=float(original.get("cost", 0) or 0), min_value=0.0, step=0.01, key=f"{key_prefix}_cost_{asset_index}")
+                new_name = st.text_input("名称", value=str(original.get("name", "")), key=f"{key_prefix}_name_{asset_index}")
+                save_cols = st.columns(2)
+                with save_cols[0]:
+                    if st.button("保存修改", key=f"{key_prefix}_save_{asset_index}", use_container_width=True):
+                        watchlist_store.upsert_position(
+                            {
+                                "market": new_market,
+                                "symbol": new_symbol,
+                                "name": new_name,
+                                "quantity": new_quantity,
+                                "cost": new_cost,
+                                "note": original.get("note", ""),
+                            },
+                            index=asset_index,
+                        )
+                        st.session_state.pop(edit_key, None)
+                        st.cache_data.clear()
+                        st.rerun()
+                with save_cols[1]:
+                    if st.button("取消修改", key=f"{key_prefix}_cancel_{asset_index}", use_container_width=True):
+                        st.session_state.pop(edit_key, None)
+                        st.rerun()
+
+        st.markdown('<div style="height:1px;background:rgba(110,170,255,0.06);margin:0.12rem 0 0.18rem 0;"></div>', unsafe_allow_html=True)
+
+
+def render_import_preview(mode: str):
+    preview_key = f"{mode}_import_preview"
+    if preview_key not in st.session_state:
+        return
+
+    title = "自选导入预览" if mode == "watchlist" else "持仓导入预览"
+    st.markdown(f"**{title}**")
+    preview_df = pd.DataFrame(st.session_state[preview_key])
+    if preview_df.empty:
+        st.info("AI 没有识别出可导入的资产。")
+        return
+
+    if mode == "watchlist":
+        preview_df = preview_df.reindex(columns=["market", "symbol", "name"]).fillna("")
+        edited = st.data_editor(
+            preview_df,
+            num_rows="dynamic",
+            hide_index=True,
+            column_config={
+                "market": st.column_config.SelectboxColumn("市场", options=list(MARKET_LABEL_TO_KEY.keys()), required=True),
+                "symbol": st.column_config.TextColumn("代码", required=True),
+                "name": st.column_config.TextColumn("名称"),
+            },
+            key=f"{mode}_preview_editor",
+            use_container_width=True,
+        )
+        confirm_label = "确认导入自选"
+    else:
+        preview_df = preview_df.reindex(columns=["market", "symbol", "name", "quantity", "cost"]).fillna("")
+        edited = st.data_editor(
+            preview_df,
+            num_rows="dynamic",
+            hide_index=True,
+            column_config={
+                "market": st.column_config.SelectboxColumn("市场", options=list(MARKET_LABEL_TO_KEY.keys()), required=True),
+                "symbol": st.column_config.TextColumn("代码", required=True),
+                "name": st.column_config.TextColumn("名称"),
+                "quantity": st.column_config.NumberColumn("持仓数量", min_value=0.0),
+                "cost": st.column_config.NumberColumn("持仓成本", min_value=0.0),
+            },
+            key=f"{mode}_preview_editor",
+            use_container_width=True,
+        )
+        confirm_label = "确认导入持仓"
+
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        if st.button(confirm_label, key=f"{mode}_confirm_import", use_container_width=True):
+            records = edited.to_dict("records")
+            if mode == "watchlist":
+                current = get_market_watchlists()
+                grouped = {key: list(current.get(key, [])) for key in MARKET_CONFIG}
+                for row in records:
+                    market_label = str(row.get("market", "")).strip()
+                    symbol = str(row.get("symbol", "")).strip()
+                    if not market_label or not symbol:
+                        continue
+                    market_key = get_market_key_from_label(market_label)
+                    grouped.setdefault(market_key, []).append(symbol)
+                watchlist_store.save_watchlists(grouped)
+            else:
+                normalized_positions = []
+                for row in records:
+                    market_label = str(row.get("market", "")).strip()
+                    symbol = str(row.get("symbol", "")).strip()
+                    if not market_label or not symbol:
+                        continue
+                    normalized_positions.append(
+                        {
+                            "market": market_label,
+                            "symbol": symbol,
+                            "name": str(row.get("name", "")).strip(),
+                            "quantity": row.get("quantity", 0),
+                            "cost": row.get("cost", 0),
+                            "note": "",
+                        }
+                    )
+                watchlist_store.save_positions(get_positions() + normalized_positions)
+            st.session_state.pop(preview_key, None)
+            st.cache_data.clear()
+            st.rerun()
+    with action_cols[1]:
+        if st.button("取消导入", key=f"{mode}_cancel_import", use_container_width=True):
+            st.session_state.pop(preview_key, None)
+            st.rerun()
+
+
+def handle_image_import(mode: str, uploader_key: str, button_key: str):
+    file = st.file_uploader(
+        "上传截图",
+        type=["png", "jpg", "jpeg", "webp"],
+        key=uploader_key,
+        help="上传交易软件截图，AI 会先识别并生成可编辑预览。",
+    )
+    if st.button("开始 AI 识别", key=button_key, use_container_width=True):
+        if not file:
+            st.warning("请先上传截图。")
+            return
+        if not config.CLAUDE_API_KEY:
+            st.warning("当前未配置 Claude API Key，暂时无法识别截图。")
+            return
+        with st.spinner("AI 正在识别截图…"):
+            try:
+                items = recognize_import_from_image(file, mode)
+            except Exception as exc:
+                st.error(f"截图识别失败：{exc}")
+                return
+        st.session_state[f"{mode}_import_preview"] = items
+        st.rerun()
+
+
 # ════════════════════════════════════════════════════════════════════
 #  侧边栏
 # ════════════════════════════════════════════════════════════════════
@@ -1984,7 +2523,8 @@ with st.sidebar:
 
     page = st.radio(
         "导航",
-        ["🏠 市场总览", "🤖 AI 早报", "US 美股", "CN A股", "📦 期货", "📊 K线图表"],
+        ["🏠 市场总览", "⭐ 自选与持仓管理", "🧾 自选管理", "💼 持仓管理", "🤖 AI 早报", "US 美股", "CN A股", "📦 期货", "📊 K线图表"],
+        index=0,
         label_visibility="collapsed",
     )
 
@@ -2154,7 +2694,138 @@ if st.session_state.get("detail_request_id", 0) > st.session_state.get("detail_s
 # ════════════════════════════════════════════════════════════════════
 #  页面：市场总览
 # ════════════════════════════════════════════════════════════════════
-if page == "🏠 市场总览":
+if page == "⭐ 自选与持仓管理":
+    render_hero(
+        "自选与持仓管理",
+        "统一查看美国股票、中国股票、国际期货和国内期货的全部自选资产，默认从这里进入整套监控流程。",
+        kicker="Unified Watchlist",
+    )
+    watchlists = get_market_watchlists()
+    total_df = build_total_watchlist_frame(watchlists)
+
+    cards = []
+    for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
+        cards.append(
+            {
+                "label": MARKET_KEY_TO_LABEL[market_key],
+                "value": f'{len(watchlists.get(market_key, []))} 项',
+                "note": "已纳入总自选",
+                "color": "#7bc7ff",
+            }
+        )
+    render_status_strip(cards)
+
+    if total_df.empty:
+        st.info("当前自选为空，请先到“自选管理”添加或导入资产。")
+    else:
+        summary_cols = [c for c in ["市场", "资产名称", "资产代码", "现价", "涨跌额", "涨跌幅%", "更新时间"] if c in total_df.columns]
+        with panel("全部自选资产"):
+            for market_label, market_df in total_df.groupby("市场", sort=False):
+                st.markdown(f"**{market_label}**")
+                render_table(
+                    market_df[summary_cols],
+                    detail_type=market_df["asset_type"].iloc[0],
+                    symbol_col="资产代码",
+                    name_col="资产名称",
+                    clickable_cols=["资产名称", "资产代码"],
+                    key_prefix=f"total_{market_label}",
+                )
+
+elif page == "🧾 自选管理":
+    render_hero(
+        "自选管理",
+        "统一管理股票和期货自选，支持手动维护，也支持上传截图后由 AI 批量识别，确认预览后再入库。",
+        kicker="Watchlist Admin",
+    )
+    watchlists = get_market_watchlists()
+
+    with panel("AI 批量导入自选"):
+        handle_image_import("watchlist", "watchlist_image_upload", "watchlist_ai_import_btn")
+        render_import_preview("watchlist")
+
+    with panel("手动新增自选"):
+        add_cols = st.columns([1.2, 1.6, 1])
+        market_label = add_cols[0].selectbox("市场", list(MARKET_LABEL_TO_KEY.keys()), key="manual_watch_market")
+        symbol_text = add_cols[1].text_input("代码", placeholder="支持逗号批量输入", key="manual_watch_symbols")
+        if add_cols[2].button("添加到自选", key="manual_watch_add_btn", use_container_width=True):
+            market_key = get_market_key_from_label(market_label)
+            symbols = parse_symbol_input(symbol_text, uppercase=(market_key != "cn_futures"))
+            if not symbols:
+                st.warning("请先输入至少一个代码。")
+            else:
+                watchlist_store.save_watchlist(market_key, watchlists.get(market_key, []) + symbols)
+                st.cache_data.clear()
+                st.rerun()
+
+    for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
+        market_label = MARKET_KEY_TO_LABEL[market_key]
+        with panel(f"{market_label} 自选"):
+            symbols = watchlists.get(market_key, [])
+            st.caption(f"当前共 {len(symbols)} 项")
+            if not symbols:
+                st.info("当前为空，可手动添加或上传截图导入。")
+                continue
+            market_df = build_watchlist_market_frame(market_key, symbols)
+            if market_df.empty:
+                st.warning("行情暂未获取到，但你仍可保留该市场自选。")
+                fallback_name_col = "资产名称"
+                fallback_code_col = "资产代码"
+                fallback_df = pd.DataFrame(
+                    {
+                        fallback_name_col: symbols,
+                        fallback_code_col: symbols,
+                        "现价": [""] * len(symbols),
+                        "涨跌幅": [""] * len(symbols),
+                        "更新时间": [""] * len(symbols),
+                    }
+                )
+                render_watchlist_row_actions(fallback_df, market_key, key_prefix=f"manage_{market_key}")
+            else:
+                display_cols = [c for c in ["资产名称", "资产代码", "现价", "涨跌幅%", "更新时间"] if c in market_df.columns]
+                rename_df = market_df[display_cols].rename(columns={"资产名称": "名称", "资产代码": "代码", "涨跌幅%": "涨跌幅"})
+                render_watchlist_row_actions(rename_df, market_key, key_prefix=f"manage_{market_key}")
+
+elif page == "💼 持仓管理":
+    render_hero(
+        "持仓管理",
+        "统一管理真实持仓，支持截图 AI 识别、导入前预览确认，以及逐行修改持仓数量和持仓成本。",
+        kicker="Portfolio Focus",
+    )
+
+    with panel("AI 批量导入持仓"):
+        handle_image_import("positions", "positions_image_upload", "positions_ai_import_btn")
+        render_import_preview("positions")
+
+    with panel("手动新增持仓"):
+        add_cols = st.columns(5)
+        market_label = add_cols[0].selectbox("市场", list(MARKET_LABEL_TO_KEY.keys()), key="manual_position_market")
+        symbol_value = add_cols[1].text_input("代码", key="manual_position_symbol")
+        name_value = add_cols[2].text_input("名称", key="manual_position_name")
+        qty_value = add_cols[3].number_input("数量", min_value=0.0, step=1.0, key="manual_position_qty")
+        cost_value = add_cols[4].number_input("成本", min_value=0.0, step=0.01, key="manual_position_cost")
+        if st.button("新增持仓", key="manual_position_add_btn", use_container_width=True):
+            if not symbol_value.strip():
+                st.warning("请先输入持仓代码。")
+            else:
+                watchlist_store.upsert_position(
+                    {
+                        "market": market_label,
+                        "symbol": symbol_value,
+                        "name": name_value,
+                        "quantity": qty_value,
+                        "cost": cost_value,
+                        "note": "",
+                    }
+                )
+                st.cache_data.clear()
+                st.rerun()
+
+    positions = get_positions()
+    with panel("持仓资产表"):
+        position_df = build_positions_frame(positions)
+        render_positions_row_actions(position_df, positions)
+
+elif page == "🏠 市场总览":
     render_hero(
         "全球金融市场总览",
         "一页查看美国指数、A股风向、大宗商品和核心自选股。设计上我把它收拢成更像晨会看板的结构：先看市场温度，再看关键资产，再下钻到明细表。",
@@ -2401,43 +3072,7 @@ elif page == "US 美股":
         current_watchlist = get_us_watchlist()
 
         with panel("自选股管理"):
-            manage_col1, manage_col2 = st.columns([1.1, 1.4])
-            with manage_col1:
-                add_input = st.text_input(
-                    "添加美股代码",
-                    placeholder="例如：AMD / NFLX / BRK.B",
-                    key="us_watchlist_add_input",
-                )
-                if st.button("添加到自选股", key="us_watchlist_add_btn", use_container_width=True):
-                    normalized_input = add_input.replace("，", ",").replace(" ", ",")
-                    new_symbols = [s.strip().upper() for s in normalized_input.split(",") if s.strip()]
-                    if not new_symbols:
-                        st.warning("请先输入至少一个美股代码。")
-                    else:
-                        updated = watchlist_store.save_watchlist("us", current_watchlist + new_symbols)
-                        st.cache_data.clear()
-                        st.success(f"已保存 {len(updated)} 个自选股")
-                        st.rerun()
-            with manage_col2:
-                remove_symbols = st.multiselect(
-                    "删除自选股",
-                    options=current_watchlist,
-                    default=[],
-                    key="us_watchlist_remove_symbols",
-                )
-                if st.button("从自选股删除", key="us_watchlist_remove_btn", use_container_width=True):
-                    if not remove_symbols:
-                        st.warning("请先选择要删除的股票。")
-                    else:
-                        updated = [sym for sym in current_watchlist if sym not in set(remove_symbols)]
-                        if not updated:
-                            st.warning("至少保留 1 个自选股。")
-                        else:
-                            watchlist_store.save_watchlist("us", updated)
-                            st.cache_data.clear()
-                            st.success(f"已删除 {len(remove_symbols)} 个自选股")
-                            st.rerun()
-            st.caption("这里的自选股会同步影响首页、美股页、财报日历和 K 线选股。")
+            st.info("美股自选的新增、逐行删除和 AI 截图导入，已经统一迁移到“自选管理”页。这里保留查看和分析。")
         with st.spinner("加载数据…"):
             us_df = load_us_data(tuple(current_watchlist))
         if not us_df.empty:
@@ -2448,12 +3083,12 @@ elif page == "US 美股":
                 col1, col2 = st.columns(2)
                 with col1:
                     st.subheader("🔴 涨幅榜 Top 5")
-                    top5 = us_df.nlargest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
-                    render_table(top5, detail_type="us_stock", symbol_col="名称", name_col="名称", clickable_cols=["名称"], key_prefix="us_top5")
+                    top5 = us_df.nlargest(5, "涨跌幅%")[["名称", "代码", "现价", "涨跌幅%"]]
+                    render_table(top5, detail_type="us_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称"], key_prefix="us_top5")
                 with col2:
                     st.subheader("🟢 跌幅榜 Top 5")
-                    bot5 = us_df.nsmallest(5, "涨跌幅%")[["名称", "现价", "涨跌幅%"]]
-                    render_table(bot5, detail_type="us_stock", symbol_col="名称", name_col="名称", clickable_cols=["名称"], key_prefix="us_bot5")
+                    bot5 = us_df.nsmallest(5, "涨跌幅%")[["名称", "代码", "现价", "涨跌幅%"]]
+                    render_table(bot5, detail_type="us_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称"], key_prefix="us_bot5")
             with panel("全部自选股"):
                 render_table(us_df, detail_type="us_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称", "代码"], key_prefix="us_full_table")
 
@@ -2622,14 +3257,14 @@ elif page == "CN A股":
             st.warning(f"⚠️ 指数数据获取失败：{err}")
         if not cn_idx.empty:
             cols_show = [c for c in ["名称", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_idx.columns]
-            render_table(cn_idx[cols_show])
+            render_table(cn_idx[cols_show + ["代码"]], detail_type="cn_index", symbol_col="代码", name_col="名称", clickable_cols=["名称"], key_prefix="cn_index")
 
     with panel("⭐ 自选股"):
         with st.spinner("加载自选股…"):
-            cn_df = load_cn_stocks(_tushare_ready=tushare_ok)
+            cn_df = load_cn_watchlist_data(tuple(get_cn_watchlist()), _tushare_ready=tushare_ok)
         if not cn_df.empty:
             cols_show = [c for c in ["名称", "代码", "现价", "涨跌额", "涨跌幅%", "成交量(亿)"] if c in cn_df.columns]
-            render_table(cn_df[cols_show])
+            render_table(cn_df[cols_show], detail_type="cn_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称", "代码"], key_prefix="cn_watch")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -2654,70 +3289,7 @@ elif page == "📦 期货":
             with panel("国际期货实时行情"):
                 cols_show = ["品种", "现价", "涨跌额", "涨跌幅%", "更新时间"]
                 available = [c for c in cols_show if c in fut_df.columns]
-                df_display = fut_df[["分类"] + available].copy()
-
-                header_cells = "".join(f'<th>{html_lib.escape(c)}</th>' for c in available)
-                rows_html = ""
-                current_cat = None
-                for _, row in df_display.iterrows():
-                    cat = row["分类"]
-                    if cat != current_cat:
-                        current_cat = cat
-                        rows_html += (
-                            f'<tr style="background:rgba(73,198,255,0.08);">'
-                            f'<td colspan="{len(available)}" style="color:#49c6ff;font-weight:600;'
-                            f'font-size:0.8rem;padding:0.5rem 1rem;letter-spacing:0.06em;">'
-                            f'{html_lib.escape(cat)}</td></tr>'
-                        )
-                    cells = ""
-                    for col in available:
-                        val = row[col]
-                        cell_style = ""
-                        display = html_lib.escape(str(val))
-                        if col == "涨跌幅%":
-                            try:
-                                v = float(val)
-                                if v > 0:
-                                    cell_style = "color:#38f28b;font-weight:600;"
-                                    display = f"+{v:.2f}%"
-                                elif v < 0:
-                                    cell_style = "color:#ff6257;font-weight:600;"
-                                    display = f"{v:.2f}%"
-                                else:
-                                    cell_style = "color:#8ea3bd;"
-                                    display = f"{v:.2f}%"
-                            except Exception:
-                                pass
-                        elif col == "现价":
-                            cell_style = "color:#eaf2ff;font-weight:600;font-variant-numeric:tabular-nums;"
-                        elif col == "涨跌额":
-                            try:
-                                v = float(val)
-                                cell_style = "color:#38f28b;" if v > 0 else ("color:#ff6257;" if v < 0 else "color:#8ea3bd;")
-                                display = f"+{v:.2f}" if v > 0 else f"{v:.2f}"
-                            except Exception:
-                                pass
-                        cells += f'<td style="{cell_style}">{display}</td>'
-                    rows_html += f"<tr>{cells}</tr>"
-
-                st.markdown(f"""
-                <div style="overflow-x:auto;border-radius:12px;border:1px solid rgba(110,170,255,0.12);background:rgba(10,16,28,0.7);">
-                <table style="width:100%;border-collapse:collapse;font-size:0.88rem;color:#c8d8ea;">
-                    <thead>
-                        <tr style="border-bottom:1px solid rgba(110,170,255,0.18);background:rgba(73,198,255,0.05);">
-                            {header_cells}
-                        </tr>
-                    </thead>
-                    <tbody>{rows_html}</tbody>
-                </table>
-                </div>
-                <style>
-                table td, table th {{ padding:0.6rem 1rem; text-align:left; white-space:nowrap; }}
-                table th {{ font-size:0.75rem; font-weight:500; color:#5a7a9a; letter-spacing:0.05em; text-transform:uppercase; }}
-                table tbody tr {{ border-bottom:1px solid rgba(110,170,255,0.06); transition:background 0.15s; }}
-                table tbody tr:hover {{ background:rgba(73,198,255,0.05); }}
-                </style>
-                """, unsafe_allow_html=True)
+                render_table(fut_df[["分类"] + available], detail_type="intl_future", symbol_col="代码", name_col="品种", clickable_cols=["品种"], key_prefix="intl_fut_table")
 
             with panel("涨跌幅对比"):
                 chart_df = fut_df[["品种", "涨跌幅%"]].copy()
@@ -2748,71 +3320,7 @@ elif page == "📦 期货":
             with panel("国内期货实时行情"):
                 cols_show = ["品种", "现价", "涨跌额", "涨跌幅%", "成交量(万手)", "更新时间"]
                 available = [c for c in cols_show if c in cn_fut_df.columns]
-                df_display = cn_fut_df[["分类"] + available].copy()
-
-                # 构建带分类标题行的统一 HTML 表格
-                header_cells = "".join(f'<th>{html_lib.escape(c)}</th>' for c in available)
-                rows_html = ""
-                current_cat = None
-                for _, row in df_display.iterrows():
-                    cat = row["分类"]
-                    if cat != current_cat:
-                        current_cat = cat
-                        rows_html += (
-                            f'<tr style="background:rgba(73,198,255,0.08);">'
-                            f'<td colspan="{len(available)}" style="color:#49c6ff;font-weight:600;'
-                            f'font-size:0.8rem;padding:0.5rem 1rem;letter-spacing:0.06em;">'
-                            f'{html_lib.escape(cat)}</td></tr>'
-                        )
-                    cells = ""
-                    for col in available:
-                        val = row[col]
-                        cell_style = ""
-                        display = html_lib.escape(str(val))
-                        if col == "涨跌幅%":
-                            try:
-                                v = float(val)
-                                if v > 0:
-                                    cell_style = "color:#38f28b;font-weight:600;"
-                                    display = f"+{v:.2f}%"
-                                elif v < 0:
-                                    cell_style = "color:#ff6257;font-weight:600;"
-                                    display = f"{v:.2f}%"
-                                else:
-                                    cell_style = "color:#8ea3bd;"
-                                    display = f"{v:.2f}%"
-                            except Exception:
-                                pass
-                        elif col == "现价":
-                            cell_style = "color:#eaf2ff;font-weight:600;font-variant-numeric:tabular-nums;"
-                        elif col == "涨跌额":
-                            try:
-                                v = float(val)
-                                cell_style = "color:#38f28b;" if v > 0 else ("color:#ff6257;" if v < 0 else "color:#8ea3bd;")
-                                display = f"+{v:.2f}" if v > 0 else f"{v:.2f}"
-                            except Exception:
-                                pass
-                        cells += f'<td style="{cell_style}">{display}</td>'
-                    rows_html += f"<tr>{cells}</tr>"
-
-                st.markdown(f"""
-                <div style="overflow-x:auto;border-radius:12px;border:1px solid rgba(110,170,255,0.12);background:rgba(10,16,28,0.7);">
-                <table style="width:100%;border-collapse:collapse;font-size:0.88rem;color:#c8d8ea;">
-                    <thead>
-                        <tr style="border-bottom:1px solid rgba(110,170,255,0.18);background:rgba(73,198,255,0.05);">
-                            {header_cells}
-                        </tr>
-                    </thead>
-                    <tbody>{rows_html}</tbody>
-                </table>
-                </div>
-                <style>
-                table td, table th {{ padding:0.6rem 1rem; text-align:left; white-space:nowrap; }}
-                table th {{ font-size:0.75rem; font-weight:500; color:#5a7a9a; letter-spacing:0.05em; text-transform:uppercase; }}
-                table tbody tr {{ border-bottom:1px solid rgba(110,170,255,0.06); transition:background 0.15s; }}
-                table tbody tr:hover {{ background:rgba(73,198,255,0.05); }}
-                </style>
-                """, unsafe_allow_html=True)
+                render_table(cn_fut_df[["分类"] + available], detail_type="cn_future", symbol_col="品种", name_col="品种", clickable_cols=["品种"], key_prefix="cn_fut_table")
 
             with panel("涨跌幅对比"):
                 chart_df = cn_fut_df[["品种", "涨跌幅%"]].copy()
