@@ -266,9 +266,21 @@ st.markdown("""
         font-weight: 700;
         box-shadow: 0 10px 20px rgba(0,0,0,0.22);
     }
+    .stPopover button {
+        border-radius: 14px !important;
+        border: 1px solid rgba(73, 198, 255, 0.18) !important;
+        background: linear-gradient(180deg, #132338 0%, #0c1728 100%) !important;
+        color: #eaf2ff !important;
+        font-weight: 700 !important;
+        box-shadow: 0 10px 20px rgba(0,0,0,0.22) !important;
+    }
     .stButton > button:hover, .stDownloadButton > button:hover {
         border-color: rgba(73, 198, 255, 0.45);
         color: #ffffff;
+    }
+    .stPopover button:hover {
+        border-color: rgba(73, 198, 255, 0.45) !important;
+        color: #ffffff !important;
     }
     .stTabs [data-baseweb="tab-list"] {
         gap: 0.5rem;
@@ -505,6 +517,12 @@ MARKET_CONFIG = {
     "intl_futures": {"label": "国际期货", "asset_type": "intl_future", "symbol_col": "代码", "name_col": "品种"},
     "cn_futures": {"label": "国内期货", "asset_type": "cn_future", "symbol_col": "品种", "name_col": "品种"},
 }
+MARKET_CURRENCY = {
+    "us": "USD",
+    "cn": "CNY",
+    "intl_futures": "USD",
+    "cn_futures": "CNY",
+}
 
 MARKET_LABEL_TO_KEY = {meta["label"]: key for key, meta in MARKET_CONFIG.items()}
 MARKET_KEY_TO_LABEL = {key: meta["label"] for key, meta in MARKET_CONFIG.items()}
@@ -535,7 +553,7 @@ def load_cn_watchlist_data(watchlist: tuple[str, ...], _tushare_ready: bool = Fa
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_futures():
-    return _disk_or_fetch("intl_futures", lambda: futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES))
+    return _disk_or_fetch("intl_futures_v2", lambda: futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_intl_futures_watchlist_data(watchlist: tuple[str, ...]):
@@ -549,7 +567,7 @@ def load_intl_futures_watchlist_data(watchlist: tuple[str, ...]):
             return df.iloc[0:0].copy()
         return df[df["代码"].isin(list(watchlist))].reset_index(drop=True)
 
-    return _disk_or_fetch(f"intl_fut_watch_{watch_key}", _fetch)
+    return _disk_or_fetch(f"intl_fut_watch_v2_{watch_key}", _fetch)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_futures():
@@ -591,6 +609,21 @@ def get_sparkline_prices(symbol: str, days: int = 30) -> list:
         return hist["Close"].dropna().tolist()
     except Exception:
         return []
+
+
+@st.cache_data(ttl=3600)
+def load_next_us_earnings_date(symbol: str) -> str:
+    try:
+        import yfinance as yf
+
+        cal = yf.Ticker(symbol).calendar
+        if cal and isinstance(cal, dict):
+            dates = cal.get("Earnings Date") or []
+            if dates:
+                return pd.Timestamp(dates[0]).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return ""
 
 # 品种名 → (product_prefix, tushare_exchange)
 CN_FUTURES_TS_CODE = {
@@ -715,6 +748,30 @@ def load_cn_futures_history(product: str) -> "pd.DataFrame":
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=3600)
+def load_usdcny_rate() -> float:
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker("USDCNY=X").history(period="5d", interval="1d")
+        close = pd.to_numeric(hist.get("Close"), errors="coerce").dropna()
+        if not close.empty and float(close.iloc[-1]) > 0:
+            return float(close.iloc[-1])
+    except Exception as e:
+        print(f"[FX] USD/CNY 获取失败: {e}")
+    return 7.2
+
+
+def convert_amount_to_usd(amount, market_key: str):
+    numeric = pd.to_numeric(amount, errors="coerce")
+    if pd.isna(numeric):
+        return None
+    if get_market_currency(market_key) == "CNY":
+        rate = load_usdcny_rate()
+        return float(numeric) / rate if rate else float(numeric)
+    return float(numeric)
+
+
 def get_kline_cache_key(hist: "pd.DataFrame", symbol: str = "", asset_type: str = "") -> str:
     """用资产身份 + 最后一根 K 线作为 AI 缓存失效依据。"""
     if hist is None or hist.empty:
@@ -771,6 +828,10 @@ def get_market_key_from_label(label: str) -> str:
 
 def get_market_asset_type(market_key: str) -> str:
     return MARKET_CONFIG.get(market_key, {}).get("asset_type", "")
+
+
+def get_market_currency(market_key: str) -> str:
+    return MARKET_CURRENCY.get(market_key, "USD")
 
 
 def get_market_watchlists() -> dict[str, list[str]]:
@@ -832,6 +893,9 @@ def build_watchlist_market_frame(market_key: str, symbols: list[str]) -> pd.Data
         return pd.DataFrame(fallback_rows)
 
     out = df.copy()
+    order_map = {str(symbol).strip().upper(): idx for idx, symbol in enumerate(symbols)}
+    out["_display_order"] = out[symbol_col].astype(str).str.strip().str.upper().map(order_map).fillna(len(symbols))
+    out = out.sort_values("_display_order").drop(columns="_display_order").reset_index(drop=True)
     out["市场"] = market_label
     out["资产名称"] = out[name_col]
     out["资产代码"] = out[symbol_col]
@@ -853,6 +917,88 @@ def build_total_watchlist_frame(watchlists: dict[str, list[str]]) -> pd.DataFram
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def _format_volume_value(value) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        numeric = float(value)
+    except Exception:
+        return str(value)
+    if abs(numeric) >= 1_000_000_000:
+        return f"{numeric / 1_000_000_000:.2f}B"
+    if abs(numeric) >= 1_000_000:
+        return f"{numeric / 1_000_000:.2f}M"
+    if abs(numeric) >= 10_000:
+        return f"{numeric / 10_000:.2f}万"
+    return f"{numeric:.0f}"
+
+
+def _compute_rsi(hist: pd.DataFrame, period: int = 14) -> float | None:
+    if hist is None or hist.empty or "close" not in hist.columns or len(hist) < period + 1:
+        return None
+    close = pd.to_numeric(hist["close"], errors="coerce").dropna()
+    if len(close) < period + 1:
+        return None
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    last_gain = avg_gain.iloc[-1]
+    last_loss = avg_loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
+        return None
+    if last_loss == 0:
+        return 100.0
+    rs = last_gain / last_loss
+    return 100 - (100 / (1 + rs))
+
+
+def _calc_return(current: float, base: float | None) -> float | None:
+    if base in (None, 0) or pd.isna(base):
+        return None
+    return (current / base - 1) * 100
+
+
+def _compute_period_performance(hist: pd.DataFrame) -> dict:
+    if hist is None or hist.empty or "close" not in hist.columns:
+        return {"today": None, "week": None, "month": None, "ytd": None, "year": None}
+    close = pd.to_numeric(hist["close"], errors="coerce").dropna()
+    if len(close) < 2:
+        return {"today": None, "week": None, "month": None, "ytd": None, "year": None}
+    current = float(close.iloc[-1])
+    values = {
+        "today": _calc_return(current, float(close.iloc[-2])) if len(close) >= 2 else None,
+        "week": _calc_return(current, float(close.iloc[-6])) if len(close) >= 6 else None,
+        "month": _calc_return(current, float(close.iloc[-22])) if len(close) >= 22 else None,
+        "year": _calc_return(current, float(close.iloc[-253])) if len(close) >= 253 else _calc_return(current, float(close.iloc[0])),
+    }
+    current_year = datetime.now().year
+    index_series = pd.DatetimeIndex(close.index)
+    try:
+        if index_series.tz is not None:
+            ytd_start = pd.Timestamp(f"{current_year}-01-01", tz=index_series.tz)
+        else:
+            ytd_start = pd.Timestamp(f"{current_year}-01-01")
+    except Exception:
+        ytd_start = pd.Timestamp(f"{current_year}-01-01")
+    ytd_series = close[index_series >= ytd_start]
+    values["ytd"] = _calc_return(current, float(ytd_series.iloc[0])) if len(ytd_series) >= 1 else None
+    return values
+
+
+def get_position_history(asset_type: str, symbol: str) -> pd.DataFrame:
+    if asset_type == "us_stock":
+        return load_us_history(symbol, "1y")
+    if asset_type in ("cn_stock", "cn_index"):
+        return load_cn_history(symbol)
+    if asset_type == "intl_future":
+        return load_futures_history(symbol, "1y")
+    if asset_type == "cn_future":
+        return load_cn_futures_history(symbol)
+    return pd.DataFrame()
 
 
 def get_position_quote_row(position: dict) -> dict:
@@ -889,10 +1035,25 @@ def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
         name = position.get("name") or quote_row.get("asset_name") or symbol
         market_key = get_market_key_from_label(market_label)
         asset_type = get_market_asset_type(market_key)
+        quote_currency = get_market_currency(market_key)
+        hist = get_position_history(asset_type, symbol)
+        perf = _compute_period_performance(hist)
+        rsi = _compute_rsi(hist)
         cost_amount = float(quantity) * float(cost)
         current_amount = float(quantity) * float(current_price) if pd.notna(current_price) else None
         pnl_amount = current_amount - cost_amount if current_amount is not None else None
         pnl_pct = (pnl_amount / cost_amount * 100) if cost_amount and pnl_amount is not None else None
+        cost_amount_usd = convert_amount_to_usd(cost_amount, market_key)
+        current_amount_usd = convert_amount_to_usd(current_amount, market_key) if current_amount is not None else None
+        pnl_amount_usd = convert_amount_to_usd(pnl_amount, market_key) if pnl_amount is not None else None
+        volume_value = (
+            quote_row.get("成交量")
+            if "成交量" in quote_row
+            else quote_row.get("成交量(亿)")
+            if "成交量(亿)" in quote_row
+            else quote_row.get("成交量(万手)")
+        )
+        next_earnings = load_next_us_earnings_date(symbol) if asset_type == "us_stock" else ""
         rows.append(
             {
                 "index": idx,
@@ -902,15 +1063,86 @@ def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
                 "持仓数量": float(quantity),
                 "持仓成本": float(cost),
                 "现价": round(float(current_price), 4) if pd.notna(current_price) else "",
+                "涨跌": quote_row.get("涨跌额", ""),
+                "涨跌%": quote_row.get("涨跌幅%", quote_row.get("涨跌幅", "")),
+                "成交量": _format_volume_value(volume_value),
+                "RSI": round(rsi, 2) if rsi is not None else "",
                 "持仓市值": round(current_amount, 2) if current_amount is not None else "",
                 "浮盈亏": round(pnl_amount, 2) if pnl_amount is not None else "",
                 "浮盈亏%": round(pnl_pct, 2) if pnl_pct is not None else "",
+                "计价货币": quote_currency,
+                "持仓成本USD": round(cost_amount_usd, 2) if cost_amount_usd is not None else "",
+                "持仓市值USD": round(current_amount_usd, 2) if current_amount_usd is not None else "",
+                "浮盈亏USD": round(pnl_amount_usd, 2) if pnl_amount_usd is not None else "",
+                "今日": round(perf["today"], 2) if perf["today"] is not None else "",
+                "一周": round(perf["week"], 2) if perf["week"] is not None else "",
+                "一个月": round(perf["month"], 2) if perf["month"] is not None else "",
+                "今年至今": round(perf["ytd"], 2) if perf["ytd"] is not None else "",
+                "全年": round(perf["year"], 2) if perf["year"] is not None else "",
+                "下一财报": next_earnings,
                 "asset_symbol": symbol,
                 "asset_name": name,
                 "asset_type": asset_type,
             }
         )
     return pd.DataFrame(rows)
+
+
+def build_watchlist_monitor_frame(watchlists: dict[str, list[str]]) -> pd.DataFrame:
+    monitor_order = watchlist_store.get_watchlist_monitor_order()
+    monitor_order_map = {key: idx for idx, key in enumerate(monitor_order)}
+    rows = []
+    for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
+        symbols = watchlists.get(market_key, [])
+        market_df = build_watchlist_market_frame(market_key, symbols)
+        if market_df is None or market_df.empty:
+            continue
+        for source_index, (_, row) in enumerate(market_df.iterrows()):
+            asset_type = str(row.get("asset_type", ""))
+            symbol = str(row.get("asset_symbol", "") or row.get("资产代码", "")).strip()
+            name = str(row.get("asset_name", "") or row.get("资产名称", "")).strip() or symbol
+            market = str(row.get("市场", ""))
+            hist = get_position_history(asset_type, symbol)
+            rsi = _compute_rsi(hist)
+            volume_value = (
+                row.get("成交量")
+                if "成交量" in row
+                else row.get("成交量(亿)")
+                if "成交量(亿)" in row
+                else row.get("成交量(万手)")
+            )
+            rows.append(
+                {
+                    "市场": market,
+                    "代码": symbol,
+                    "名称": name,
+                    "现价": row.get("现价", ""),
+                    "涨跌": row.get("涨跌额", ""),
+                    "涨跌%": row.get("涨跌幅%", row.get("涨跌幅", "")),
+                    "成交量": _format_volume_value(volume_value),
+                    "RSI": round(rsi, 2) if rsi is not None else "",
+                    "asset_type": asset_type,
+                    "asset_symbol": symbol,
+                    "asset_name": name,
+                    "market_key": market_key,
+                    "source_index": source_index,
+                    "monitor_key": f"{market_key}:{symbol}",
+                }
+            )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    if not monitor_order:
+        watchlist_store.save_watchlist_monitor_order(df["monitor_key"].tolist())
+        monitor_order_map = {key: idx for idx, key in enumerate(df["monitor_key"].tolist())}
+    df["_monitor_order"] = df["monitor_key"].map(monitor_order_map)
+    fallback_start = len(monitor_order_map)
+    df["_monitor_order"] = [
+        order if pd.notna(order) else fallback_start + idx
+        for idx, order in enumerate(df["_monitor_order"])
+    ]
+    df = df.sort_values("_monitor_order").drop(columns="_monitor_order").reset_index(drop=True)
+    return df
 
 
 def extract_json_block(text: str) -> str:
@@ -1243,6 +1475,9 @@ def render_table(
             detail_symbol = str(row.get(symbol_col, "")).strip() if symbol_col and symbol_col in df.columns else ""
             if detail_type == "us_stock" and "代码" in df.columns:
                 detail_symbol = str(row.get("代码", detail_symbol)).strip()
+            if detail_type == "intl_future" and not detail_symbol and name_col in df.columns:
+                intl_symbol_map = {name: sym for sym, name in futures.get_all_symbols()}
+                detail_symbol = str(intl_symbol_map.get(str(row.get(name_col, "")).strip(), "")).strip()
             detail_name = str(row.get(name_col, detail_symbol or "")) if name_col in df.columns else detail_symbol
 
             for col_ui, col_name in zip(row_cols, df.columns):
@@ -1307,6 +1542,9 @@ def render_table(
         detail_symbol = str(row.get(symbol_col, "")).strip() if symbol_col and symbol_col in df.columns else ""
         if detail_type == "us_stock" and "代码" in df.columns:
             detail_symbol = str(row.get("代码", detail_symbol)).strip()
+        if detail_type == "intl_future" and not detail_symbol and name_col in df.columns:
+            intl_symbol_map = {name: sym for sym, name in futures.get_all_symbols()}
+            detail_symbol = str(intl_symbol_map.get(str(row.get(name_col, "")).strip(), "")).strip()
         detail_name = str(row.get(name_col, detail_symbol or "")) if name_col in df.columns else detail_symbol
         trigger_id = ""
         row_trigger_attr = ""
@@ -1432,11 +1670,11 @@ def render_hero(title: str, text: str, kicker: str = "Market Monitor"):
     )
 
 
-def render_status_strip(cards: list[dict]):
+def render_status_strip(cards: list[dict], title: str = "📡 市场温度计"):
     if not cards:
         return
     with st.container(border=True):
-        st.markdown('<div class="section-title">📡 市场温度计</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
         cols = st.columns(len(cards))
         for col, card in zip(cols, cards):
             with col:
@@ -1523,11 +1761,21 @@ def render_hot_news_panel():
         combined = pd.concat([new_df, prev_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=["标题", "时间", "日期"])
         st.session_state[_key] = combined.head(20)
-    display_df = st.session_state.get(_key, new_df).head(5)
+    expand_key = "_hot_news_expand_all"
+    all_df = st.session_state.get(_key, new_df)
+    display_limit = 12 if st.session_state.get(expand_key, False) else 6
+    display_df = all_df.head(display_limit)
 
     with st.container(border=True):
         st.markdown('<div class="section-title">🗞 热点消息</div>', unsafe_allow_html=True)
         render_news_cards(display_df)
+        if len(all_df) > 6:
+            action_cols = st.columns([1, 1, 1])
+            with action_cols[2]:
+                button_label = "Collapse" if st.session_state.get(expand_key, False) else "Expand All"
+                if st.button(button_label, key="hot_news_expand_all_btn", use_container_width=True):
+                    st.session_state[expand_key] = not st.session_state.get(expand_key, False)
+                    st.rerun()
 
 
 TICKER_DOMAIN = {
@@ -1977,11 +2225,11 @@ def show_asset_detail(symbol: str, display_name: str, asset_type: str = "us_stoc
 
     with st.spinner("加载K线数据…"):
         if asset_type in ("us_stock", "us_index"):
-            hist = load_us_history(symbol, "6mo")
+            hist = load_us_history(symbol, "2y")
         elif asset_type == "cn_stock":
             hist = load_cn_history(symbol)
         elif asset_type == "intl_future":
-            hist = load_futures_history(symbol, "6mo")
+            hist = load_futures_history(symbol, "2y")
         elif asset_type == "cn_index":
             hist = load_cn_history(symbol)
         elif asset_type == "cn_future":
@@ -2250,7 +2498,7 @@ def render_watchlist_row_actions(df: pd.DataFrame, market_key: str, key_prefix: 
         return
 
     headers = st.columns([1.2, 1.1, 1, 1, 1, 1.2])
-    for col, label in zip(headers, ["名称", "代码", "现价", "涨跌幅", "更新时间", "操作"]):
+    for col, label in zip(headers, ["名称", "代码", "现价", "涨跌幅", "更新时间", "✏ 操作"]):
         col.markdown(f"**{label}**")
 
     pending_key = f"{key_prefix}_pending_delete"
@@ -2279,7 +2527,7 @@ def render_watchlist_row_actions(df: pd.DataFrame, market_key: str, key_prefix: 
             if st.session_state.get(pending_key) == symbol:
                 confirm_cols = st.columns(2)
                 with confirm_cols[0]:
-                    if st.button("确认删除", key=f"{key_prefix}_confirm_{market_key}_{symbol}_{row_idx}", use_container_width=True):
+                    if st.button("✏ 确认", key=f"{key_prefix}_confirm_{market_key}_{symbol}_{row_idx}", use_container_width=True):
                         updated = [item for item in current_watchlist if item != symbol]
                         watchlist_store.save_watchlist(market_key, updated)
                         st.session_state.pop(pending_key, None)
@@ -2290,7 +2538,7 @@ def render_watchlist_row_actions(df: pd.DataFrame, market_key: str, key_prefix: 
                         st.session_state.pop(pending_key, None)
                         st.rerun()
             else:
-                if st.button("删除", key=f"{key_prefix}_delete_{market_key}_{symbol}_{row_idx}", use_container_width=True):
+                if st.button("✏ 删除", key=f"{key_prefix}_delete_{market_key}_{symbol}_{row_idx}", use_container_width=True):
                     st.session_state[pending_key] = symbol
                     st.rerun()
 
@@ -2302,15 +2550,15 @@ def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_pr
         st.info("当前还没有持仓资产。")
         return
 
-    headers = st.columns([1.1, 0.9, 1.1, 0.9, 0.9, 0.8, 0.9, 0.9, 1.4])
-    for col, label in zip(headers, ["市场", "代码", "名称", "数量", "成本", "现价", "浮盈亏", "浮盈亏%", "操作"]):
+    headers = st.columns([1.0, 0.9, 1.1, 0.85, 0.85, 0.8, 0.8, 0.8, 0.95, 0.9, 1.4])
+    for col, label in zip(headers, ["市场", "代码", "名称", "数量", "成本", "现价", "涨跌", "涨跌%", "持仓市值", "浮盈亏%", "✏ 操作"]):
         col.markdown(f"**{label}**")
 
     edit_key = f"{key_prefix}_editing_index"
     delete_key = f"{key_prefix}_pending_delete"
 
     for row_idx, row in df.iterrows():
-        cols = st.columns([1.1, 0.9, 1.1, 0.9, 0.9, 0.8, 0.9, 0.9, 1.4])
+        cols = st.columns([1.0, 0.9, 1.1, 0.85, 0.85, 0.8, 0.8, 0.8, 0.95, 0.9, 1.4])
         asset_index = int(row["index"])
         symbol = str(row["代码"])
         name = str(row["名称"])
@@ -2325,14 +2573,16 @@ def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_pr
         cols[3].markdown(f'{float(row["持仓数量"]):g}')
         cols[4].markdown(f'{float(row["持仓成本"]):g}')
         cols[5].markdown(str(row.get("现价", "")))
-        cols[6].markdown(str(row.get("浮盈亏", "")))
-        cols[7].markdown(f'{row["浮盈亏%"]:+.2f}%' if pd.notna(pd.to_numeric(row.get("浮盈亏%"), errors="coerce")) and str(row.get("浮盈亏%")) != "" else "")
+        cols[6].markdown(str(row.get("涨跌", "")))
+        cols[7].markdown(f'{float(row["涨跌%"]):+.2f}%' if pd.notna(pd.to_numeric(row.get("涨跌%"), errors="coerce")) and str(row.get("涨跌%")) != "" else "")
+        cols[8].markdown(str(row.get("持仓市值", "")))
+        cols[9].markdown(f'{float(row["浮盈亏%"]):+.2f}%' if pd.notna(pd.to_numeric(row.get("浮盈亏%"), errors="coerce")) and str(row.get("浮盈亏%")) != "" else "")
 
-        with cols[8]:
+        with cols[10]:
             if st.session_state.get(delete_key) == asset_index:
                 action_cols = st.columns(2)
                 with action_cols[0]:
-                    if st.button("确认删", key=f"{key_prefix}_confirm_delete_{asset_index}_{row_idx}", use_container_width=True):
+                    if st.button("✏ 确认", key=f"{key_prefix}_confirm_delete_{asset_index}_{row_idx}", use_container_width=True):
                         watchlist_store.delete_position(asset_index)
                         st.session_state.pop(delete_key, None)
                         st.cache_data.clear()
@@ -2344,11 +2594,11 @@ def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_pr
             else:
                 action_cols = st.columns(2)
                 with action_cols[0]:
-                    if st.button("修改", key=f"{key_prefix}_edit_{asset_index}_{row_idx}", use_container_width=True):
+                    if st.button("✏ 修改", key=f"{key_prefix}_edit_{asset_index}_{row_idx}", use_container_width=True):
                         st.session_state[edit_key] = asset_index
                         st.rerun()
                 with action_cols[1]:
-                    if st.button("删除", key=f"{key_prefix}_delete_{asset_index}_{row_idx}", use_container_width=True):
+                    if st.button("✏ 删除", key=f"{key_prefix}_delete_{asset_index}_{row_idx}", use_container_width=True):
                         st.session_state[delete_key] = asset_index
                         st.rerun()
 
@@ -2391,6 +2641,304 @@ def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_pr
 
         st.markdown('<div style="height:1px;background:rgba(110,170,255,0.06);margin:0.12rem 0 0.18rem 0;"></div>', unsafe_allow_html=True)
 
+
+def render_position_metric_cards(df: pd.DataFrame, key_prefix: str = "position_cards"):
+    if df is None or df.empty:
+        st.info("当前还没有持仓资产。")
+        return
+    cols = st.columns(min(3, len(df)))
+    for i, (_, row) in enumerate(df.iterrows()):
+        with cols[i % len(cols)]:
+            try:
+                pct = float(row["涨跌%"])
+                delta_str = f"{pct:+.2f}%"
+                direction = "up" if pct > 0 else ("down" if pct < 0 else "flat")
+            except Exception:
+                delta_str = str(row.get("涨跌%", ""))
+                direction = "flat"
+            value = html_lib.escape(str(row.get("现价", "")))
+            label = html_lib.escape(str(row.get("名称", "")))
+            trigger_token = quote(f'{row.get("asset_type","")}:{row.get("代码","")}', safe="").replace("%", "_")
+            trigger_id = f"__t{trigger_token}"
+            card_id = f"card-{trigger_token}"
+            spark_prices = get_position_history(str(row.get("asset_type", "")), str(row.get("代码", "")))
+            spark_html = make_sparkline_svg(pd.to_numeric(spark_prices["close"], errors="coerce").dropna().tolist()[-30:], direction != "down") if spark_prices is not None and not spark_prices.empty else ""
+            card_html = (
+                f'<div class="m-card clickable" data-trigger="{trigger_id}" id="{card_id}">'
+                f'<div class="m-label">{label}</div>'
+                f'<div class="m-value {"metric-up" if direction=="up" else "metric-down" if direction=="down" else "metric-flat"}" style="font-size:1.35rem">{value}</div>'
+                f'<span class="m-badge {direction}">{html_lib.escape(delta_str)}</span>'
+                f'{f"<div style=\"position:absolute;top:8px;right:8px;opacity:0.85;\">{spark_html}</div>" if spark_html else ""}'
+                f'</div>'
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
+            if st.button(trigger_id, key=f"{key_prefix}_{trigger_token}"):
+                open_asset_detail(str(row.get("代码", "")), str(row.get("名称", "")), str(row.get("asset_type", "")))
+                st.rerun()
+
+
+def build_position_summary_cards(df: pd.DataFrame) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    cost_total = pd.to_numeric(df.get("持仓成本USD"), errors="coerce").fillna(0)
+    market_total = pd.to_numeric(df.get("持仓市值USD"), errors="coerce").fillna(0)
+    pnl_total = pd.to_numeric(df.get("浮盈亏USD"), errors="coerce").fillna(0)
+    win_rate = ((pd.to_numeric(df["浮盈亏"], errors="coerce").fillna(0) > 0).sum() / len(df) * 100) if len(df) else 0
+    fx_note = "人民币资产已按 USD/CNY 折算"
+    return [
+        {"label": "持仓资产数", "value": f"{len(df)} 项", "note": "真实持仓资产", "color": "#7bc7ff"},
+        {"label": "持仓成本", "value": f"${cost_total.sum():,.2f}", "note": fx_note, "color": "#f2f7ff"},
+        {"label": "持仓市值", "value": f"${market_total.sum():,.2f}", "note": fx_note, "color": "#f2f7ff"},
+        {"label": "浮盈/浮亏", "value": f"${pnl_total.sum():+,.2f}", "note": fx_note, "color": "#38f28b" if pnl_total.sum() >= 0 else "#ff6257"},
+        {"label": "胜率", "value": f"{win_rate:.0f}%", "note": "盈利持仓占比", "color": "#7bc7ff"},
+    ]
+
+
+def summarize_watchlist_market_breadth(total_watchlist_df: pd.DataFrame) -> list[dict]:
+    if total_watchlist_df is None or total_watchlist_df.empty:
+        return []
+    cards = []
+    for market_label, group in total_watchlist_df.groupby("市场", sort=False):
+        numeric = pd.to_numeric(group.get("涨跌幅%"), errors="coerce").dropna()
+        if numeric.empty:
+            cards.append({"label": market_label, "value": "--", "note": "暂无可用行情", "color": "#8ea3bd"})
+            continue
+        up_count = int((numeric > 0).sum())
+        total = int(len(numeric))
+        cards.append(
+            {
+                "label": market_label,
+                "value": f"{numeric.mean():+.2f}%",
+                "note": f"{up_count}/{total} 上涨",
+                "color": "#38f28b" if numeric.mean() >= 0 else "#ff6257",
+            }
+        )
+    return cards
+
+
+def render_position_performance_table(df: pd.DataFrame, key_prefix: str = "position_perf"):
+    if df is None or df.empty:
+        st.info("当前还没有持仓资产。")
+        return
+    show_cols = ["市场", "代码", "名称", "今日", "一周", "一个月", "今年至今", "全年", "下一财报"]
+    header = st.columns([1.0, 0.9, 1.2, 0.8, 0.8, 0.9, 0.95, 0.9, 1.0])
+    for col, label in zip(header, show_cols):
+        col.markdown(f"**{label}**")
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        cols = st.columns([1.0, 0.9, 1.2, 0.8, 0.8, 0.9, 0.95, 0.9, 1.0])
+        cols[0].markdown(str(row.get("市场", "")))
+        cols[1].markdown(str(row.get("代码", "")))
+        with cols[2]:
+            if st.button(str(row.get("名称", "")), key=f"{key_prefix}_detail_{row_idx}", use_container_width=True):
+                open_asset_detail(str(row.get("代码", "")), str(row.get("名称", "")), str(row.get("asset_type", "")))
+                st.rerun()
+        for idx, col_name in enumerate(["今日", "一周", "一个月", "今年至今", "全年"], start=3):
+            val = pd.to_numeric(row.get(col_name), errors="coerce")
+            cols[idx].markdown(f"{float(val):+.2f}%" if pd.notna(val) else "")
+        cols[8].markdown(str(row.get("下一财报", "")))
+
+
+def render_position_indicator_table(df: pd.DataFrame, key_prefix: str = "position_indicator"):
+    if df is None or df.empty:
+        st.info("当前还没有持仓资产。")
+        return
+    show_cols = ["市场", "代码", "名称", "现价", "涨跌", "涨跌%", "成交量", "RSI", "下一财报"]
+    header = st.columns([1.0, 0.9, 1.2, 0.85, 0.85, 0.85, 0.9, 0.7, 1.0])
+    for col, label in zip(header, show_cols):
+        col.markdown(f"**{label}**")
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        cols = st.columns([1.0, 0.9, 1.2, 0.85, 0.85, 0.85, 0.9, 0.7, 1.0])
+        cols[0].markdown(str(row.get("市场", "")))
+        cols[1].markdown(str(row.get("代码", "")))
+        with cols[2]:
+            if st.button(str(row.get("名称", "")), key=f"{key_prefix}_detail_{row_idx}", use_container_width=True):
+                open_asset_detail(str(row.get("代码", "")), str(row.get("名称", "")), str(row.get("asset_type", "")))
+                st.rerun()
+        cols[3].markdown(str(row.get("现价", "")))
+        cols[4].markdown(str(row.get("涨跌", "")))
+        pct_val = pd.to_numeric(row.get("涨跌%"), errors="coerce")
+        cols[5].markdown(f"{float(pct_val):+.2f}%" if pd.notna(pct_val) else "")
+        cols[6].markdown(str(row.get("成交量", "")))
+        rsi_val = pd.to_numeric(row.get("RSI"), errors="coerce")
+        cols[7].markdown(f"{float(rsi_val):.1f}" if pd.notna(rsi_val) else "")
+        cols[8].markdown(str(row.get("下一财报", "")))
+
+
+def _move_list_item(items: list, index: int, target: int) -> list:
+    if not items or index < 0 or index >= len(items):
+        return items
+    target = max(0, min(len(items) - 1, target))
+    if index == target:
+        return items
+    updated = list(items)
+    item = updated.pop(index)
+    updated.insert(target, item)
+    return updated
+
+
+def handle_monitor_action(row: pd.Series, action: str, mode: str):
+    if mode == "watchlist":
+        market_key = str(row.get("market_key", "")).strip()
+        symbol = str(row.get("代码", "")).strip()
+        monitor_key = str(row.get("monitor_key", f"{market_key}:{symbol}")).strip()
+        current = get_market_watchlists().get(market_key, [])
+        global_order = watchlist_store.get_watchlist_monitor_order()
+        full_df = build_watchlist_monitor_frame(get_market_watchlists())
+        current_global_keys = full_df["monitor_key"].tolist() if not full_df.empty and "monitor_key" in full_df.columns else []
+        if not current:
+            return
+        if action == "delete":
+            updated_market = [item for item in current if item != symbol]
+            updated_global = [item for item in (global_order or current_global_keys) if item != monitor_key]
+        elif action in ("top", "up", "down"):
+            working = list(global_order or current_global_keys)
+            if monitor_key not in working:
+                working.append(monitor_key)
+            current_index = working.index(monitor_key)
+            if action == "top":
+                updated_global = _move_list_item(working, current_index, 0)
+            elif action == "up":
+                updated_global = _move_list_item(working, current_index, current_index - 1)
+            else:
+                updated_global = _move_list_item(working, current_index, current_index + 1)
+            updated_market = current
+        else:
+            return
+        watchlist_store.save_watchlist(market_key, updated_market)
+        watchlist_store.save_watchlist_monitor_order(updated_global)
+    elif mode == "position":
+        current = get_positions()
+        index = int(row.get("index", -1))
+        if not current or index < 0 or index >= len(current):
+            return
+        if action == "delete":
+            del current[index]
+        elif action == "top":
+            current = _move_list_item(current, index, 0)
+        elif action == "up":
+            current = _move_list_item(current, index, index - 1)
+        elif action == "down":
+            current = _move_list_item(current, index, index + 1)
+        else:
+            return
+        watchlist_store.save_positions(current)
+    st.cache_data.clear()
+
+
+def render_asset_monitor_table(df: pd.DataFrame, columns: list[tuple[str, str]], key_prefix: str = "asset_monitor", mode: str = ""):
+    if df is None or df.empty:
+        st.info("当前暂无可展示的数据。")
+        return
+
+    sort_key_state = f"{key_prefix}_sort_field"
+    sort_dir_state = f"{key_prefix}_sort_dir"
+    sort_field = st.session_state.get(sort_key_state, "")
+    sort_dir = st.session_state.get(sort_dir_state, "asc")
+
+    if sort_field and sort_field in df.columns:
+        sort_series = df[sort_field]
+        numeric_series = pd.to_numeric(sort_series, errors="coerce")
+        if numeric_series.notna().any():
+            df = df.assign(_sort_value=numeric_series)
+        else:
+            df = df.assign(_sort_value=sort_series.astype(str))
+        df = df.sort_values("_sort_value", ascending=(sort_dir == "asc"), na_position="last").drop(columns="_sort_value").reset_index(drop=True)
+
+    widths = []
+    for label, _ in columns:
+        if label in ("市场", "代码"):
+            widths.append(0.9)
+        elif label == "名称":
+            widths.append(1.2)
+        elif label in ("成交量", "浮盈亏情况"):
+            widths.append(1.0)
+        else:
+            widths.append(0.85)
+    widths.append(1.35)
+
+    header_cols = st.columns(widths)
+    for col, (label, field) in zip(header_cols, columns):
+        indicator = ""
+        if sort_field == field:
+            indicator = " ↑" if sort_dir == "asc" else " ↓"
+        if col.button(f"{label}{indicator}", key=f"{key_prefix}_sort_{field}", use_container_width=True):
+            if sort_field == field:
+                if sort_dir == "asc":
+                    st.session_state[sort_dir_state] = "desc"
+                else:
+                    st.session_state.pop(sort_key_state, None)
+                    st.session_state.pop(sort_dir_state, None)
+            else:
+                st.session_state[sort_key_state] = field
+                st.session_state[sort_dir_state] = "asc"
+            st.rerun()
+    header_cols[-1].markdown("**✏ 操作**")
+    delete_confirm_key = f"{key_prefix}_delete_confirm"
+
+    for row_idx, (_, row) in enumerate(df.iterrows()):
+        row_cols = st.columns(widths)
+        row_token = f'{mode}:{row.get("市场","")}:{row.get("代码","")}:{row.get("source_index", row.get("index", row_idx))}'
+        for idx, (label, field) in enumerate(columns):
+            value = row.get(field, "")
+            if label == "名称":
+                with row_cols[idx]:
+                    if st.button(str(value), key=f"{key_prefix}_detail_{row_idx}_{field}", use_container_width=True):
+                        open_asset_detail(str(row.get("asset_symbol", row.get("代码", ""))), str(row.get("asset_name", value)), str(row.get("asset_type", "")))
+                        st.rerun()
+                continue
+
+            if label in ("涨跌%", "RSI"):
+                numeric = pd.to_numeric(value, errors="coerce")
+                if pd.notna(numeric):
+                    if label == "涨跌%":
+                        value = f"{float(numeric):+.2f}%"
+                    else:
+                        value = f"{float(numeric):.1f}"
+            if label in ("涨跌", "涨跌%", "浮盈亏情况"):
+                numeric = pd.to_numeric(row.get(field), errors="coerce")
+                if label == "浮盈亏情况":
+                    raw_text = str(value)
+                    if raw_text.startswith("+"):
+                        row_cols[idx].markdown(f'<span style="color:#38f28b;font-weight:600;">{html_lib.escape(raw_text)}</span>', unsafe_allow_html=True)
+                        continue
+                    if raw_text.startswith("-"):
+                        row_cols[idx].markdown(f'<span style="color:#ff6257;font-weight:600;">{html_lib.escape(raw_text)}</span>', unsafe_allow_html=True)
+                        continue
+                elif pd.notna(numeric):
+                    color = "#38f28b" if float(numeric) > 0 else "#ff6257" if float(numeric) < 0 else "#8ea3bd"
+                    row_cols[idx].markdown(f'<span style="color:{color};font-weight:600;">{html_lib.escape(str(value))}</span>', unsafe_allow_html=True)
+                    continue
+            row_cols[idx].markdown(str(value))
+
+        with row_cols[-1]:
+            with st.popover("✏", use_container_width=True):
+                if st.button("置顶", key=f"{key_prefix}_top_{row_idx}", use_container_width=True):
+                    handle_monitor_action(row, "top", mode)
+                    st.rerun()
+                if st.button("上移", key=f"{key_prefix}_up_{row_idx}", use_container_width=True):
+                    handle_monitor_action(row, "up", mode)
+                    st.rerun()
+                if st.button("下移", key=f"{key_prefix}_down_{row_idx}", use_container_width=True):
+                    handle_monitor_action(row, "down", mode)
+                    st.rerun()
+                if st.session_state.get(delete_confirm_key) == row_token:
+                    st.warning("确认删除这条记录？")
+                    confirm_cols = st.columns(2)
+                    with confirm_cols[0]:
+                        if st.button("确认删除", key=f"{key_prefix}_confirm_delete_{row_idx}", use_container_width=True):
+                            handle_monitor_action(row, "delete", mode)
+                            st.session_state.pop(delete_confirm_key, None)
+                            st.rerun()
+                    with confirm_cols[1]:
+                        if st.button("取消", key=f"{key_prefix}_cancel_delete_{row_idx}", use_container_width=True):
+                            st.session_state.pop(delete_confirm_key, None)
+                            st.rerun()
+                else:
+                    if st.button("删除", key=f"{key_prefix}_delete_{row_idx}", use_container_width=True):
+                        st.session_state[delete_confirm_key] = row_token
+                        st.rerun()
+
+        st.markdown('<div style="height:1px;background:rgba(110,170,255,0.06);margin:0.12rem 0 0.18rem 0;"></div>', unsafe_allow_html=True)
 
 def render_import_preview(mode: str):
     preview_key = f"{mode}_import_preview"
@@ -2523,7 +3071,7 @@ with st.sidebar:
 
     page = st.radio(
         "导航",
-        ["🏠 市场总览", "⭐ 自选与持仓管理", "🧾 自选管理", "💼 持仓管理", "🤖 AI 早报", "US 美股", "CN A股", "📦 期货", "📊 K线图表"],
+        ["🏠 市场总览", "⭐ 自选与持仓监控", "🧾 自选管理", "💼 持仓管理", "🤖 AI 早报", "US 美股", "CN A股", "📦 期货", "📊 K线图表"],
         index=0,
         label_visibility="collapsed",
     )
@@ -2694,42 +3242,76 @@ if st.session_state.get("detail_request_id", 0) > st.session_state.get("detail_s
 # ════════════════════════════════════════════════════════════════════
 #  页面：市场总览
 # ════════════════════════════════════════════════════════════════════
-if page == "⭐ 自选与持仓管理":
+if page == "⭐ 自选与持仓监控":
     render_hero(
-        "自选与持仓管理",
-        "统一查看美国股票、中国股票、国际期货和国内期货的全部自选资产，默认从这里进入整套监控流程。",
-        kicker="Unified Watchlist",
+        "自选与持仓监控",
+        "把自选资产与真实持仓拆成两个监控面板，分别查看关键行情指标和盈亏状态。",
+        kicker="Unified Monitor",
     )
     watchlists = get_market_watchlists()
-    total_df = build_total_watchlist_frame(watchlists)
+    watchlist_df = build_watchlist_monitor_frame(watchlists)
+    positions = get_positions()
+    position_df = build_positions_frame(positions)
 
-    cards = []
-    for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
-        cards.append(
-            {
-                "label": MARKET_KEY_TO_LABEL[market_key],
-                "value": f'{len(watchlists.get(market_key, []))} 项',
-                "note": "已纳入总自选",
-                "color": "#7bc7ff",
-            }
-        )
-    render_status_strip(cards)
+    tab_watch, tab_position = st.tabs(["📋 自选监控", "💼 持仓监控"])
 
-    if total_df.empty:
-        st.info("当前自选为空，请先到“自选管理”添加或导入资产。")
-    else:
-        summary_cols = [c for c in ["市场", "资产名称", "资产代码", "现价", "涨跌额", "涨跌幅%", "更新时间"] if c in total_df.columns]
-        with panel("全部自选资产"):
-            for market_label, market_df in total_df.groupby("市场", sort=False):
-                st.markdown(f"**{market_label}**")
-                render_table(
-                    market_df[summary_cols],
-                    detail_type=market_df["asset_type"].iloc[0],
-                    symbol_col="资产代码",
-                    name_col="资产名称",
-                    clickable_cols=["资产名称", "资产代码"],
-                    key_prefix=f"total_{market_label}",
-                )
+    with tab_watch:
+        if watchlist_df.empty:
+            st.info("当前自选为空，请先到“自选管理”添加或导入资产。")
+        else:
+            render_asset_monitor_table(
+                watchlist_df[["市场", "代码", "名称", "现价", "涨跌", "涨跌%", "成交量", "RSI", "asset_type", "asset_symbol", "asset_name", "market_key", "source_index"]],
+                columns=[
+                    ("市场", "市场"),
+                    ("代码", "代码"),
+                    ("名称", "名称"),
+                    ("现价", "现价"),
+                    ("涨跌", "涨跌"),
+                    ("涨跌%", "涨跌%"),
+                    ("成交量", "成交量"),
+                    ("RSI", "RSI"),
+                ],
+                key_prefix="watch_monitor",
+                mode="watchlist",
+            )
+
+    with tab_position:
+        if position_df.empty:
+            st.info("当前还没有持仓资产。")
+        else:
+            render_status_strip(build_position_summary_cards(position_df), title="💼 持仓总览")
+            position_monitor_df = position_df.copy()
+            position_monitor_df["持仓成本监控"] = position_monitor_df.apply(
+                lambda row: f'${float(row["持仓成本USD"]):,.2f}'
+                if pd.notna(pd.to_numeric(row.get("持仓成本USD"), errors="coerce"))
+                else "",
+                axis=1,
+            )
+            position_monitor_df["浮盈亏情况"] = position_monitor_df.apply(
+                lambda row: (
+                    f'${float(row["浮盈亏USD"]):+,.2f} / {float(row["浮盈亏%"]):+.2f}%'
+                    if pd.notna(pd.to_numeric(row.get("浮盈亏USD"), errors="coerce"))
+                    and pd.notna(pd.to_numeric(row.get("浮盈亏%"), errors="coerce"))
+                    else ""
+                ),
+                axis=1,
+            )
+            render_asset_monitor_table(
+                position_monitor_df[["市场", "代码", "名称", "持仓成本监控", "现价", "涨跌%", "浮盈亏情况", "成交量", "RSI", "asset_type", "asset_symbol", "asset_name", "index"]],
+                columns=[
+                    ("市场", "市场"),
+                    ("代码", "代码"),
+                    ("名称", "名称"),
+                    ("成本", "持仓成本监控"),
+                    ("现价", "现价"),
+                    ("涨跌%", "涨跌%"),
+                    ("浮盈亏情况", "浮盈亏情况"),
+                    ("成交量", "成交量"),
+                    ("RSI", "RSI"),
+                ],
+                key_prefix="position_monitor",
+                mode="position",
+            )
 
 elif page == "🧾 自选管理":
     render_hero(
@@ -2744,7 +3326,7 @@ elif page == "🧾 自选管理":
         render_import_preview("watchlist")
 
     with panel("手动新增自选"):
-        add_cols = st.columns([1.2, 1.6, 1])
+        add_cols = st.columns([1.2, 1.6, 1], vertical_alignment="bottom")
         market_label = add_cols[0].selectbox("市场", list(MARKET_LABEL_TO_KEY.keys()), key="manual_watch_market")
         symbol_text = add_cols[1].text_input("代码", placeholder="支持逗号批量输入", key="manual_watch_symbols")
         if add_cols[2].button("添加到自选", key="manual_watch_add_btn", use_container_width=True):
@@ -2821,9 +3403,17 @@ elif page == "💼 持仓管理":
                 st.rerun()
 
     positions = get_positions()
+    position_df = build_positions_frame(positions)
+    render_status_strip(build_position_summary_cards(position_df), title="💼 持仓总览")
+
     with panel("持仓资产表"):
-        position_df = build_positions_frame(positions)
         render_positions_row_actions(position_df, positions)
+
+    with panel("持仓资产指标表"):
+        render_position_indicator_table(position_df[["市场", "代码", "名称", "现价", "涨跌", "涨跌%", "成交量", "RSI", "下一财报", "asset_type"]], key_prefix="position_metric")
+
+    with panel("持仓股近期表现"):
+        render_position_performance_table(position_df[["市场", "代码", "名称", "今日", "一周", "一个月", "今年至今", "全年", "下一财报", "asset_type"]], key_prefix="position_perf")
 
 elif page == "🏠 市场总览":
     render_hero(
@@ -2842,6 +3432,9 @@ elif page == "🏠 市场总览":
         cn_fut_df_dash = load_cn_futures()
     with st.spinner("加载自选股…"):
         us_df = load_us_data(tuple(get_us_watchlist()))
+    positions = get_positions()
+    position_df = build_positions_frame(positions)
+    total_watchlist_df = build_total_watchlist_frame(get_market_watchlists())
     with st.spinner("加载全球市场快照…"):
         global_df = load_global_market_snapshot()
     with panel("🌐 全球市场追踪"):
@@ -2849,7 +3442,8 @@ elif page == "🏠 市场总览":
 
     render_hot_news_panel()
 
-    render_status_strip(summarize_market_breadth(us_idx, cn_idx, fut_df, cn_fut_df_dash))
+    render_status_strip(build_position_summary_cards(position_df), title="💼 持仓总览")
+    render_status_strip(summarize_watchlist_market_breadth(total_watchlist_df), title="📡 自选资产市场温度计")
 
 
     col_sec, col_earn = st.columns(2)
@@ -2859,8 +3453,9 @@ elif page == "🏠 市场总览":
             sector_constituent_df = load_sector_constituents()
             render_sector_heatmap(sector_df, sector_constituent_df)
     with col_earn:
-        with panel("📅 财报日历"):
-            earn_df = load_earnings_calendar(tuple(get_us_watchlist()))
+        with panel("📅 自选财报日历"):
+            us_watch_union = sorted(set(get_us_watchlist()))
+            earn_df = load_earnings_calendar(tuple(us_watch_union))
             render_earnings_calendar(earn_df)
 
     with panel("🇺🇸 美国指数脉搏"):
@@ -2910,15 +3505,11 @@ elif page == "🏠 市场总览":
         else:
             st.info("当前未获取到国内期货数据")
 
-    with panel("⭐ 核心自选股观察"):
-        if not us_df.empty:
-            us_stock_spark = _build_sparklines_from_df(us_df, "名称", "代码")
-            render_metrics_row(us_df, "名称", "现价", "涨跌幅%", n_cols=3, sparklines=us_stock_spark, detail_type="us_stock", symbol_col="代码")
-            display_cols = ["名称", "现价", "涨跌额", "涨跌幅%", "更新时间"]
-            available = [c for c in display_cols if c in us_df.columns]
-            render_table(us_df[available], detail_type="us_stock", symbol_col="代码", name_col="名称", clickable_cols=["名称"], key_prefix="us_watch_table")
+    with panel("⭐ 核心持仓资产观察"):
+        if not position_df.empty:
+            render_position_metric_cards(position_df, key_prefix="overview_positions")
         else:
-            st.info("当前未获取到美股自选数据")
+            st.info("当前还没有持仓资产")
 
     render_micro_status(
         [
@@ -3105,7 +3696,7 @@ elif page == "US 美股":
                 "5年": ("5y", "1d"),
                 "全部": ("max", "1d"),
             }
-            period_sel = st.selectbox("查看K线数据区间", list(period_map.keys()), index=5)
+            period_sel = st.selectbox("查看K线数据区间", list(period_map.keys()), index=6)
 
             if symbol_input:
                 quote = us_stocks.get_quote([symbol_input])
@@ -3293,22 +3884,27 @@ elif page == "📦 期货":
 
             with panel("涨跌幅对比"):
                 chart_df = fut_df[["品种", "涨跌幅%"]].copy()
-                chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if float(x) >= 0 else "跌")
-                fig = px.bar(
-                    chart_df.sort_values("涨跌幅%"),
-                    x="涨跌幅%", y="品种", orientation="h",
-                    color="颜色",
-                    color_discrete_map={"涨": "#38f28b", "跌": "#ff6257"},
-                    height=max(300, len(chart_df) * 28),
-                )
-                fig.update_layout(
-                    margin=dict(l=0, r=0, t=20, b=0),
-                    showlegend=False,
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#dfe9f8"),
-                )
-                st.plotly_chart(fig, width='stretch')
+                chart_df["涨跌幅%"] = pd.to_numeric(chart_df["涨跌幅%"], errors="coerce")
+                chart_df = chart_df.dropna(subset=["涨跌幅%"])
+                if chart_df.empty:
+                    st.info("当前暂无可用于绘制的国际期货涨跌幅数据")
+                else:
+                    chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if x >= 0 else "跌")
+                    fig = px.bar(
+                        chart_df.sort_values("涨跌幅%"),
+                        x="涨跌幅%", y="品种", orientation="h",
+                        color="颜色",
+                        color_discrete_map={"涨": "#38f28b", "跌": "#ff6257"},
+                        height=max(300, len(chart_df) * 28),
+                    )
+                    fig.update_layout(
+                        margin=dict(l=0, r=0, t=20, b=0),
+                        showlegend=False,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#dfe9f8"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
     with tab_cn:
         with st.spinner("加载国内期货数据…"):
@@ -3324,22 +3920,27 @@ elif page == "📦 期货":
 
             with panel("涨跌幅对比"):
                 chart_df = cn_fut_df[["品种", "涨跌幅%"]].copy()
-                chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if float(x) >= 0 else "跌")
-                fig = px.bar(
-                    chart_df.sort_values("涨跌幅%"),
-                    x="涨跌幅%", y="品种", orientation="h",
-                    color="颜色",
-                    color_discrete_map={"涨": "#38f28b", "跌": "#ff6257"},
-                    height=max(300, len(chart_df) * 28),
-                )
-                fig.update_layout(
-                    margin=dict(l=0, r=0, t=20, b=0),
-                    showlegend=False,
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#dfe9f8"),
-                )
-                st.plotly_chart(fig, width='stretch')
+                chart_df["涨跌幅%"] = pd.to_numeric(chart_df["涨跌幅%"], errors="coerce")
+                chart_df = chart_df.dropna(subset=["涨跌幅%"])
+                if chart_df.empty:
+                    st.info("当前暂无可用于绘制的国内期货涨跌幅数据")
+                else:
+                    chart_df["颜色"] = chart_df["涨跌幅%"].apply(lambda x: "涨" if x >= 0 else "跌")
+                    fig = px.bar(
+                        chart_df.sort_values("涨跌幅%"),
+                        x="涨跌幅%", y="品种", orientation="h",
+                        color="颜色",
+                        color_discrete_map={"涨": "#38f28b", "跌": "#ff6257"},
+                        height=max(300, len(chart_df) * 28),
+                    )
+                    fig.update_layout(
+                        margin=dict(l=0, r=0, t=20, b=0),
+                        showlegend=False,
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#dfe9f8"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -3354,15 +3955,48 @@ elif page == "📊 K线图表":
 
     with panel("图表设置"):
         col1, col2, col3 = st.columns([2, 2, 1])
+        market_options = ["美股", "A股", "A股指数", "期货（国际）", "期货（国内）"]
+        cn_index_options = {name: code for code, name in cn_stocks.DEFAULT_CN_STOCKS["指数"]}
+        intl_futures_options = {name: sym for sym, name in futures.get_all_symbols()}
+        cn_futures_options = list(CN_FUTURES_TS_CODE.keys())
         with col1:
-            market = st.selectbox("市场", ["美股", "期货（国际）"])
+            market = st.selectbox("市场", market_options)
         with col2:
             if market == "美股":
-                symbol = st.selectbox("标的", get_us_watchlist())
+                us_options = get_us_watchlist() or config.MY_US_WATCHLIST
+                symbol = st.selectbox("标的", us_options)
+                title = symbol
+            elif market == "A股":
+                cn_options = get_cn_watchlist() or config.MY_CN_WATCHLIST
+                cn_option_labels = {
+                    ts_code: next(
+                        (
+                            name
+                            for group in cn_stocks.DEFAULT_CN_STOCKS.values()
+                            for code, name in group
+                            if code == ts_code
+                        ),
+                        ts_code,
+                    )
+                    for ts_code in cn_options
+                }
+                symbol = st.selectbox(
+                    "标的",
+                    cn_options,
+                    format_func=lambda ts_code: f"{cn_option_labels.get(ts_code, ts_code)} ({ts_code})",
+                )
+                title = cn_option_labels.get(symbol, symbol)
+            elif market == "A股指数":
+                name_sel = st.selectbox("标的", list(cn_index_options.keys()))
+                symbol = cn_index_options[name_sel]
+                title = name_sel
+            elif market == "期货（国际）":
+                name_sel = st.selectbox("标的", list(intl_futures_options.keys()))
+                symbol = intl_futures_options[name_sel]
+                title = name_sel
             else:
-                fut_options = {name: sym for sym, name in futures.get_all_symbols()}
-                name_sel = st.selectbox("标的", list(fut_options.keys()))
-                symbol = fut_options[name_sel]
+                symbol = st.selectbox("标的", cn_futures_options)
+                title = symbol
         with col3:
             period_map = {
                 "1天": ("1d", "5m"),
@@ -3374,16 +4008,18 @@ elif page == "📊 K线图表":
                 "5年": ("5y", "1d"),
                 "全部": ("max", "1d"),
             }
-            period_sel = st.selectbox("查看K线数据区间", list(period_map.keys()), index=5)
+            period_sel = st.selectbox("查看K线数据区间", list(period_map.keys()), index=6)
 
         with st.spinner("加载K线数据…"):
             period_value, interval_value = period_map[period_sel]
             if market == "美股":
                 hist = load_us_history(symbol, period_value, interval_value)
-                title = symbol
-            else:
+            elif market in ("A股", "A股指数"):
+                hist = load_cn_history(symbol)
+            elif market == "期货（国际）":
                 hist = load_futures_history(symbol, period_value, interval_value)
-                title = name_sel if market == "期货（国际）" else symbol
+            else:
+                hist = load_cn_futures_history(symbol)
 
         render_kline(hist, f"{title} — {period_sel}")
 

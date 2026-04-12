@@ -6,6 +6,7 @@ from copy import deepcopy
 STORE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".watchlists.json")
 
 POSITION_FIELDS = ["market", "symbol", "name", "quantity", "cost", "note"]
+MONITOR_ORDER_KEY = "watchlist_monitor_order"
 
 
 def _load_all() -> dict:
@@ -154,4 +155,35 @@ def delete_position(index: int) -> list[dict]:
 def export_store_snapshot() -> dict:
     data = _load_all()
     return deepcopy(data)
+
+
+def get_watchlist_monitor_order() -> list[str]:
+    data = _load_all()
+    stored = data.get(MONITOR_ORDER_KEY)
+    if not isinstance(stored, list):
+        return []
+    result = []
+    seen = set()
+    for item in stored:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def save_watchlist_monitor_order(items: list[str]) -> list[str]:
+    data = _load_all()
+    cleaned = []
+    seen = set()
+    for item in items or []:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(key)
+    data[MONITOR_ORDER_KEY] = cleaned
+    _save_all(data)
+    return cleaned
 

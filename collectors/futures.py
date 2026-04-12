@@ -14,6 +14,21 @@ except ImportError:
     AKSHARE_AVAILABLE = False
 
 
+def _to_float(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _get_fast_info_value(info, key: str, default=None):
+    if isinstance(info, dict):
+        return info.get(key, default)
+    return getattr(info, key, default)
+
+
 # 国际期货标的（yfinance 支持）
 INTL_FUTURES = {
     "能源":    [("CL=F", "WTI原油"), ("BZ=F", "布伦特原油"), ("NG=F", "天然气")],
@@ -46,13 +61,41 @@ def get_intl_futures_quote(categories: list = None) -> pd.DataFrame:
         for symbol, name in items:
             try:
                 ticker = yf.Ticker(symbol)
-                hist = ticker.history(period="2d", interval="1d")
+                close_today = None
+                close_prev = None
 
-                if hist.empty:
+                try:
+                    info = ticker.fast_info or {}
+                except Exception:
+                    info = {}
+
+                close_today = _to_float(
+                    _get_fast_info_value(info, "lastPrice")
+                    or _get_fast_info_value(info, "regularMarketPrice")
+                    or _get_fast_info_value(info, "last_price")
+                )
+                close_prev = _to_float(
+                    _get_fast_info_value(info, "previousClose")
+                    or _get_fast_info_value(info, "previous_close")
+                )
+
+                if close_today is None or close_prev in (None, 0):
+                    hist = ticker.history(period="5d", interval="1d")
+                    if hist is None or hist.empty or "Close" not in hist:
+                        continue
+                    closes = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+                    if closes.empty:
+                        continue
+                    if close_today is None:
+                        close_today = float(closes.iloc[-1])
+                    if close_prev in (None, 0):
+                        close_prev = float(closes.iloc[-2]) if len(closes) >= 2 else close_today
+
+                if close_today is None:
                     continue
+                if close_prev in (None, 0):
+                    close_prev = close_today
 
-                close_today = float(hist["Close"].iloc[-1])
-                close_prev  = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else close_today
                 change      = close_today - close_prev
                 change_pct  = (change / close_prev * 100) if close_prev else 0
 
