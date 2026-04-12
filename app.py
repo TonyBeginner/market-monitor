@@ -1761,22 +1761,40 @@ def render_news_cards(df: pd.DataFrame):
 
 @get_fragment_decorator(run_every=config.REFRESH_INTERVAL)
 def render_hot_news_panel():
+    refresh_btn_key = "hot_news_manual_refresh_btn"
+    if st.session_state.pop(refresh_btn_key, False):
+        load_telegram_hotspots.clear()
+
     new_df = load_telegram_hotspots()
 
     # 累积消息到 session_state，避免每次刷新丢失历史条目
     _key = "_tg_msg_cache"
+    success_key = "_tg_msg_last_success_at"
     prev_df = st.session_state.get(_key, pd.DataFrame())
     if not new_df.empty:
         combined = pd.concat([new_df, prev_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=["标题", "时间", "日期"])
         st.session_state[_key] = combined.head(20)
+        st.session_state[success_key] = time.time()
     expand_key = "_hot_news_expand_all"
     all_df = st.session_state.get(_key, new_df)
     display_limit = 12 if st.session_state.get(expand_key, False) else 6
     display_df = all_df.head(display_limit)
+    last_success_at = st.session_state.get(success_key)
 
     with st.container(border=True):
-        st.markdown('<div class="section-title">🗞 热点消息</div>', unsafe_allow_html=True)
+        header_cols = st.columns([1, 0.45])
+        with header_cols[0]:
+            st.markdown('<div class="section-title">🗞 热点消息</div>', unsafe_allow_html=True)
+            if last_success_at:
+                st.caption(f"上次成功刷新：{datetime.fromtimestamp(last_success_at).strftime('%Y-%m-%d %H:%M:%S')}")
+        with header_cols[1]:
+            if st.button("Refresh Now", key="hot_news_refresh_now", use_container_width=True):
+                st.session_state[refresh_btn_key] = True
+                st.rerun()
+
+        if new_df.empty and last_success_at and time.time() - float(last_success_at) > config.REFRESH_INTERVAL * 3:
+            st.warning("热点消息暂时没有成功刷新，当前展示的是上次抓取到的缓存内容。")
         render_news_cards(display_df)
         if len(all_df) > 6:
             action_cols = st.columns([1, 1, 1])
