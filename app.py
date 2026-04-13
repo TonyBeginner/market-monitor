@@ -1284,6 +1284,140 @@ def infer_market_for_manual_watch(query: str) -> tuple[str | None, list[str]]:
     return None, []
 
 
+def infer_asset_for_manual_position(query: str) -> dict | None:
+    text = str(query or "").strip()
+    if not text:
+        return None
+
+    suggestions = search_all_asset_suggestions(text, limit=6)
+    normalized_text = _normalize_search_text(text)
+    exact_matches = [
+        item for item in suggestions
+        if _normalize_search_text(item.get("symbol", "")) == normalized_text
+        or _normalize_search_text(item.get("raw_symbol", "")) == normalized_text
+        or _normalize_search_text(item.get("name", "")) == normalized_text
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+
+    market_key, symbols = infer_market_for_manual_watch(text)
+    if not market_key or len(symbols) != 1:
+        return None
+
+    inferred_symbol = str(symbols[0]).strip()
+    inferred_matches = search_asset_suggestions(inferred_symbol, market_key, limit=4)
+    inferred_exact = [
+        item for item in inferred_matches
+        if _normalize_search_text(item.get("symbol", "")) == _normalize_search_text(inferred_symbol)
+        or _normalize_search_text(item.get("raw_symbol", "")) == _normalize_search_text(inferred_symbol)
+    ]
+    if inferred_exact:
+        return inferred_exact[0]
+
+    return {
+        "market_key": market_key,
+        "market": MARKET_KEY_TO_LABEL.get(market_key, market_key),
+        "symbol": inferred_symbol,
+        "raw_symbol": inferred_symbol.split(".")[0] if market_key == "cn" else inferred_symbol,
+        "name": inferred_symbol,
+    }
+
+
+def _find_existing_position_index(market_label: str, symbol: str) -> int | None:
+    normalized_market = str(market_label or "").strip()
+    normalized_symbol = str(symbol or "").strip().upper()
+    for idx, item in enumerate(get_positions()):
+        if (
+            str(item.get("market", "")).strip() == normalized_market
+            and str(item.get("symbol", "")).strip().upper() == normalized_symbol
+        ):
+            return idx
+    return None
+
+
+def _save_manual_position_entry(asset_item: dict, quantity: float, cost: float, merge_with_existing: bool) -> None:
+    market_key = str(asset_item.get("market_key", "")).strip()
+    symbol = str(asset_item.get("symbol", "")).strip()
+    market_label = MARKET_KEY_TO_LABEL.get(market_key, str(asset_item.get("market", "")).strip() or market_key)
+    asset_name = str(asset_item.get("name", symbol)).strip() or symbol
+    existing_index = _find_existing_position_index(market_label, symbol)
+
+    if merge_with_existing and existing_index is not None:
+        existing = get_positions()[existing_index]
+        old_qty = float(existing.get("quantity", 0) or 0)
+        old_cost = float(existing.get("cost", 0) or 0)
+        new_qty = float(quantity or 0)
+        total_qty = old_qty + new_qty
+        if new_qty > 0 and old_qty > 0 and total_qty > 0:
+            merged_cost = ((old_qty * old_cost) + (new_qty * float(cost or 0))) / total_qty
+        elif total_qty > 0:
+            merged_cost = old_cost
+        elif total_qty < 0:
+            merged_cost = float(cost or 0) if float(cost or 0) > 0 else old_cost
+        else:
+            merged_cost = 0.0
+        watchlist_store.upsert_position(
+            {
+                "market": market_label,
+                "symbol": symbol,
+                "name": asset_name,
+                "quantity": total_qty,
+                "cost": merged_cost,
+                "note": str(existing.get("note", "")).strip(),
+            },
+            index=existing_index,
+        )
+        st.session_state["manual_position_add_feedback"] = (
+            f"已合并持仓：{asset_name} ({symbol})，当前数量 {total_qty:g}，持仓成本 {merged_cost:g}"
+        )
+    else:
+        watchlist_store.upsert_position(
+            {
+                "market": market_label,
+                "symbol": symbol,
+                "name": asset_name,
+                "quantity": float(quantity or 0),
+                "cost": float(cost or 0),
+                "note": "",
+            }
+        )
+        st.session_state["manual_position_add_feedback"] = (
+            f"已添加持仓：{asset_name} ({symbol})，数量 {float(quantity or 0):g}，成本 {float(cost or 0):g}"
+        )
+
+    st.session_state["manual_position_pending_merge"] = None
+    st.session_state["manual_position_symbols"] = ""
+    st.session_state["manual_position_symbols_keyup"] = ""
+    st.cache_data.clear()
+    st.rerun()
+
+
+def add_manual_position_entry(asset_item: dict, quantity: float, cost: float) -> None:
+    market_key = str(asset_item.get("market_key", "")).strip()
+    symbol = str(asset_item.get("symbol", "")).strip()
+    if not market_key or not symbol:
+        st.warning("请先选择有效的持仓资产。")
+        return
+    qty = float(quantity or 0)
+    unit_cost = float(cost or 0)
+    if qty == 0:
+        st.warning("数量不能为 0，没有仓位不能添加。")
+        return
+
+    market_label = MARKET_KEY_TO_LABEL.get(market_key, str(asset_item.get("market", "")).strip() or market_key)
+    existing_index = _find_existing_position_index(market_label, symbol)
+    if existing_index is not None:
+        st.session_state["manual_position_pending_merge"] = {
+            "asset_item": asset_item,
+            "quantity": qty,
+            "cost": unit_cost,
+            "existing_index": existing_index,
+        }
+        return
+
+    _save_manual_position_entry(asset_item, qty, unit_cost, merge_with_existing=False)
+
+
 def get_market_data(market_key: str, symbols: list[str]) -> pd.DataFrame:
     symbols = [str(item).strip() for item in symbols if str(item).strip()]
     if market_key == "us":
@@ -2343,6 +2477,155 @@ def get_world_map_background_uri() -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _is_mobile_request() -> bool:
+    try:
+        headers = dict(st.context.headers)
+    except Exception:
+        headers = {}
+    user_agent = str(headers.get("User-Agent", headers.get("user-agent", ""))).lower()
+    if not user_agent:
+        return False
+    return any(token in user_agent for token in ["iphone", "android", "mobile", "ipad"])
+
+
+def _box_overlaps(box_a: dict, box_b: dict, padding: float = 0.0) -> bool:
+    return not (
+        box_a["x1"] + padding < box_b["x0"]
+        or box_a["x0"] - padding > box_b["x1"]
+        or box_a["y1"] + padding < box_b["y0"]
+        or box_a["y0"] - padding > box_b["y1"]
+    )
+
+
+def _make_text_box(center_x: float, top_y: float, width: float, height: float) -> dict:
+    half_w = width / 2
+    return {
+        "x0": center_x - half_w,
+        "x1": center_x + half_w,
+        "y0": top_y,
+        "y1": top_y + height,
+    }
+
+
+def _build_global_map_positions(bubble_df: pd.DataFrame, position_map: dict, mobile_mode: bool) -> dict:
+    candidate_offsets = [
+        (0, -8),
+        (7, -6),
+        (-7, -6),
+        (8, -1),
+        (-8, -1),
+        (0, 4),
+        (9, 5),
+        (-9, 5),
+    ] if mobile_mode else [
+        (0, -6),
+        (6, -4),
+        (-6, -4),
+        (7, 0),
+        (-7, 0),
+        (0, 4),
+        (8, 4),
+        (-8, 4),
+    ]
+    mobile_priority_positions = {
+        "纳斯达克": {"label": (17.2, 30.0), "pct": (17.2, 33.1)},
+        "道琼斯": {"label": (11.6, 40.8), "pct": (11.6, 43.9)},
+        "标普500": {"label": (21.8, 38.3), "pct": (21.8, 41.4)},
+        "富时100": {"label": (44.0, 26.0), "pct": (44.0, 29.1)},
+        "德国DAX": {"label": (55.8, 26.0), "pct": (55.8, 29.1)},
+        "法国CAC": {"label": (46.6, 42.0), "pct": (46.6, 45.1)},
+        "韩国指数": {"label": (86.0, 38.0), "pct": (86.0, 41.1)},
+        "上证": {"label": (78.0, 49.5), "pct": (78.0, 52.6)},
+        "日经": {"label": (89.4, 49.0), "pct": (89.4, 52.1)},
+        "恒生指数": {"label": (81.5, 60.0), "pct": (81.5, 63.1)},
+        "新加坡": {"label": (76.0, 69.0), "pct": (76.0, 72.1)},
+        "ASX 200": {"label": (90.5, 78.0), "pct": (90.5, 81.1)},
+    }
+    all_dots = [(float(row["plot_x"]), float(row["plot_y"])) for _, row in bubble_df.iterrows()]
+    crowded_rows = []
+    for _, row in bubble_df.iterrows():
+        dot_x = float(row["plot_x"])
+        dot_y = float(row["plot_y"])
+        nearby_count = sum(
+            1
+            for other_x, other_y in all_dots
+            if (other_x, other_y) != (dot_x, dot_y) and abs(other_x - dot_x) <= 12 and abs(other_y - dot_y) <= 12
+        )
+        crowded_rows.append((nearby_count, row))
+
+    placed_boxes = []
+    mobile_positions = {}
+    for _, row in sorted(crowded_rows, key=lambda item: (-item[0], float(item[1]["plot_x"]))):
+        name = row["名称"]
+        dot_x = float(row["plot_x"])
+        dot_y = float(row["plot_y"])
+        base_pos = position_map.get(
+            name,
+            {"dot": (dot_x, dot_y), "label": (dot_x, dot_y - 5), "pct": (dot_x, dot_y - 2)},
+        )
+        if mobile_mode and name in mobile_priority_positions:
+            base_pos = {
+                **base_pos,
+                "label": mobile_priority_positions[name]["label"],
+                "pct": mobile_priority_positions[name]["pct"],
+            }
+        base_dx = round(float(base_pos["label"][0]) - dot_x, 1)
+        base_dy = round(float(base_pos["label"][1]) - dot_y, 1)
+        preferred_offsets = [(base_dx, base_dy)] + [offset for offset in candidate_offsets if offset != (base_dx, base_dy)]
+
+        cluster_width = max(8.0, len(str(name)) * 1.9, 8.8)
+        cluster_height = 7.2
+        best_layout = None
+        best_score = None
+        for dx, dy in preferred_offsets:
+            label_x = dot_x + dx
+            label_y = dot_y + dy
+            pct_x = label_x
+            pct_y = label_y + 2.8
+            combined_box = _make_text_box(label_x, label_y - 1.4, cluster_width, cluster_height)
+            score = abs(dx) * 0.5 + abs(dy) * 0.65
+
+            if combined_box["x0"] < 2:
+                score += (2 - combined_box["x0"]) * 12
+            if combined_box["x1"] > 98:
+                score += (combined_box["x1"] - 98) * 12
+            if combined_box["y0"] < 3:
+                score += (3 - combined_box["y0"]) * 12
+            if combined_box["y1"] > 97:
+                score += (combined_box["y1"] - 97) * 12
+
+            for box in placed_boxes:
+                if _box_overlaps(combined_box, box, padding=0.8):
+                    score += 80
+
+            for other_x, other_y in all_dots:
+                if (other_x, other_y) == (dot_x, dot_y):
+                    continue
+                if (
+                    combined_box["x0"] - 1.2 <= other_x <= combined_box["x1"] + 1.2
+                    and combined_box["y0"] - 1.2 <= other_y <= combined_box["y1"] + 1.2
+                ):
+                    score += 28
+
+            if best_score is None or score < best_score:
+                best_score = score
+                best_layout = {
+                    "dot": (dot_x, dot_y),
+                    "label": (label_x, label_y),
+                    "pct": (pct_x, pct_y),
+                    "box": combined_box,
+                }
+
+        mobile_positions[name] = {
+            "dot": best_layout["dot"],
+            "label": best_layout["label"],
+            "pct": best_layout["pct"],
+        }
+        placed_boxes.append(best_layout["box"])
+
+    return {**position_map, **mobile_positions}
+
+
 def render_global_bubble_map(df: pd.DataFrame):
     if df is None or df.empty:
         st.info("当前暂无全球市场追踪图数据")
@@ -2369,11 +2652,13 @@ def render_global_bubble_map(df: pd.DataFrame):
         "新加坡": {"dot": (77, 56), "label": (76, 61), "pct": (76, 64)},
         "ASX 200": {"dot": (90.2, 70), "label": (87.4, 70), "pct": (87.4, 73)},
     }
+    mobile_mode = _is_mobile_request()
     bubble_df["plot_x"] = bubble_df["名称"].map(lambda name: position_map.get(name, {"dot": (50, 50)})["dot"][0])
     bubble_df["plot_y"] = bubble_df["名称"].map(lambda name: position_map.get(name, {"dot": (50, 50)})["dot"][1])
     bubble_df["display_color"] = bubble_df["涨跌幅%"].apply(
         lambda value: "#38f28b" if value > 0 else "#ff6257" if value < 0 else "#ffffff"
     )
+    label_positions = _build_global_map_positions(bubble_df, position_map, mobile_mode)
 
     fig = go.Figure()
     fig.add_trace(
@@ -2393,13 +2678,16 @@ def render_global_bubble_map(df: pd.DataFrame):
     )
     for _, row in bubble_df.iterrows():
         text_color = row["display_color"]
-        pos = position_map.get(row["名称"], {"label": (row["plot_x"], row["plot_y"] - 2), "pct": (row["plot_x"], row["plot_y"] + 1)})
+        pos = label_positions.get(
+            row["名称"],
+            {"label": (row["plot_x"], row["plot_y"] - 2), "pct": (row["plot_x"], row["plot_y"] + 1)},
+        )
         fig.add_annotation(
             x=pos["label"][0],
             y=pos["label"][1],
             text=row["名称"],
             showarrow=False,
-            font=dict(size=13, color=text_color, family="Arial Black"),
+            font=dict(size=11 if mobile_mode else 13, color=text_color, family="Arial Black"),
             xanchor="center",
             yanchor="middle",
             align="center",
@@ -2409,13 +2697,13 @@ def render_global_bubble_map(df: pd.DataFrame):
             y=pos["pct"][1],
             text=f"{row['涨跌幅%']:+.2f}%",
             showarrow=False,
-            font=dict(size=13, color=text_color, family="Arial Black"),
+            font=dict(size=11 if mobile_mode else 13, color=text_color, family="Arial Black"),
             xanchor="center",
             yanchor="middle",
             align="center",
         )
     fig.update_layout(
-        height=430,
+        height=470 if mobile_mode else 430,
         margin=dict(l=0, r=0, t=8, b=0),
         paper_bgcolor="#121417",
         plot_bgcolor="#121417",
@@ -3072,33 +3360,37 @@ def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_pr
             with st.container(border=True):
                 st.caption(f"编辑持仓: {name} ({symbol})")
                 edit_cols = st.columns(4)
-                new_market = edit_cols[0].selectbox(
-                    "市场",
-                    list(MARKET_LABEL_TO_KEY.keys()),
-                    index=max(0, list(MARKET_LABEL_TO_KEY.keys()).index(original.get("market", "美国股票")) if original.get("market", "美国股票") in MARKET_LABEL_TO_KEY else 0),
-                    key=f"{key_prefix}_market_{asset_index}",
-                )
-                new_symbol = edit_cols[1].text_input("代码", value=str(original.get("symbol", "")), key=f"{key_prefix}_symbol_{asset_index}")
-                new_quantity = edit_cols[2].number_input("持仓数量", value=float(original.get("quantity", 0) or 0), min_value=0.0, step=1.0, key=f"{key_prefix}_qty_{asset_index}")
+                edit_cols[0].markdown("**市场**")
+                edit_cols[0].markdown(str(original.get("market", "")) or "-")
+                edit_cols[1].markdown("**代码**")
+                edit_cols[1].markdown(str(original.get("symbol", "")) or "-")
+                new_quantity = edit_cols[2].number_input("持仓数量", value=float(original.get("quantity", 0) or 0), step=1.0, key=f"{key_prefix}_qty_{asset_index}")
                 new_cost = edit_cols[3].number_input("持仓成本", value=float(original.get("cost", 0) or 0), min_value=0.0, step=0.01, key=f"{key_prefix}_cost_{asset_index}")
-                new_name = st.text_input("名称", value=str(original.get("name", "")), key=f"{key_prefix}_name_{asset_index}")
+                st.markdown("**名称**")
+                st.markdown(str(original.get("name", "")) or "-")
                 save_cols = st.columns(2)
                 with save_cols[0]:
                     if st.button("保存修改", key=f"{key_prefix}_save_{asset_index}", use_container_width=True):
-                        watchlist_store.upsert_position(
-                            {
-                                "market": new_market,
-                                "symbol": new_symbol,
-                                "name": new_name,
-                                "quantity": new_quantity,
-                                "cost": new_cost,
-                                "note": original.get("note", ""),
-                            },
-                            index=asset_index,
-                        )
-                        st.session_state.pop(edit_key, None)
-                        st.cache_data.clear()
-                        st.rerun()
+                        if float(new_quantity or 0) == 0:
+                            watchlist_store.delete_position(asset_index)
+                            st.session_state.pop(edit_key, None)
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            watchlist_store.upsert_position(
+                                {
+                                    "market": str(original.get("market", "")),
+                                    "symbol": str(original.get("symbol", "")),
+                                    "name": str(original.get("name", "")),
+                                    "quantity": new_quantity,
+                                    "cost": new_cost,
+                                    "note": original.get("note", ""),
+                                },
+                                index=asset_index,
+                            )
+                            st.session_state.pop(edit_key, None)
+                            st.cache_data.clear()
+                            st.rerun()
                 with save_cols[1]:
                     if st.button("取消修改", key=f"{key_prefix}_cancel_{asset_index}", use_container_width=True):
                         st.session_state.pop(edit_key, None)
@@ -3123,7 +3415,8 @@ def render_position_metric_cards(df: pd.DataFrame, key_prefix: str = "position_c
                 direction = "flat"
             value = html_lib.escape(str(row.get("现价", "")))
             label = html_lib.escape(str(row.get("名称", "")))
-            trigger_token = quote(f'{row.get("asset_type","")}:{row.get("代码","")}', safe="").replace("%", "_")
+            row_token = str(row.get("index", i))
+            trigger_token = quote(f'{row.get("asset_type","")}:{row.get("代码","")}:{row_token}', safe="").replace("%", "_")
             trigger_id = f"__t{trigger_token}"
             card_id = f"card-{trigger_token}"
             spark_prices = get_position_history(str(row.get("asset_type", "")), str(row.get("代码", "")))
@@ -3896,28 +4189,99 @@ elif page == "💼 持仓管理":
         render_import_preview("positions")
 
     with panel("手动新增持仓"):
-        add_cols = st.columns(5)
-        market_label = add_cols[0].selectbox("市场", list(MARKET_LABEL_TO_KEY.keys()), key="manual_position_market")
-        symbol_value = add_cols[1].text_input("代码", key="manual_position_symbol")
-        name_value = add_cols[2].text_input("名称", key="manual_position_name")
-        qty_value = add_cols[3].number_input("数量", min_value=0.0, step=1.0, key="manual_position_qty")
-        cost_value = add_cols[4].number_input("成本", min_value=0.0, step=0.01, key="manual_position_cost")
-        if st.button("新增持仓", key="manual_position_add_btn", use_container_width=True):
-            if not symbol_value.strip():
-                st.warning("请先输入持仓代码。")
-            else:
-                watchlist_store.upsert_position(
-                    {
-                        "market": market_label,
-                        "symbol": symbol_value,
-                        "name": name_value,
-                        "quantity": qty_value,
-                        "cost": cost_value,
-                        "note": "",
-                    }
+        add_cols = st.columns([2.0, 0.7, 0.7, 1.0], vertical_alignment="bottom")
+        if st_keyup is not None:
+            with add_cols[0]:
+                position_text = st_keyup(
+                    "代码或名称",
+                    value=st.session_state.get("manual_position_symbols", ""),
+                    placeholder="支持代码或名称，自动识别市场",
+                    key="manual_position_symbols_keyup",
+                    debounce=0,
+                    label_visibility="collapsed",
                 )
-                st.cache_data.clear()
+                st.session_state["manual_position_symbols"] = position_text
+        else:
+            position_text = add_cols[0].text_input(
+                "代码或名称",
+                placeholder="支持代码或名称，自动识别市场",
+                key="manual_position_symbols",
+                label_visibility="collapsed",
+            )
+        add_cols[0].markdown('<div class="block-label">代码或名称</div>', unsafe_allow_html=True)
+        qty_value = add_cols[1].number_input("数量", min_value=0.0, step=1.0, key="manual_position_qty")
+        cost_value = add_cols[2].number_input("成本", min_value=0.0, step=0.01, key="manual_position_cost")
+        selected_asset = infer_asset_for_manual_position(position_text)
+        if add_cols[3].button("添加到持仓", key="manual_position_add_btn", use_container_width=True):
+            if not selected_asset:
+                st.warning("请先输入可识别的资产代码或名称。")
+            else:
+                add_manual_position_entry(selected_asset, qty_value, cost_value)
+
+        pending_merge = st.session_state.get("manual_position_pending_merge")
+        if pending_merge:
+            pending_asset = dict(pending_merge.get("asset_item", {}) or {})
+            pending_symbol = str(pending_asset.get("symbol", "")).strip()
+            pending_name = str(pending_asset.get("name", pending_symbol)).strip() or pending_symbol
+            existing_index = pending_merge.get("existing_index")
+            existing_item = get_positions()[existing_index] if isinstance(existing_index, int) and 0 <= existing_index < len(get_positions()) else {}
+            st.warning(
+                f"持仓里已存在 {pending_name} ({pending_symbol})。是否要合并资产？"
+            )
+            confirm_cols = st.columns([1, 1, 1.2])
+            if confirm_cols[0].button("合并资产", key="manual_position_merge_yes", use_container_width=True):
+                _save_manual_position_entry(
+                    pending_asset,
+                    float(pending_merge.get("quantity", 0) or 0),
+                    float(pending_merge.get("cost", 0) or 0),
+                    merge_with_existing=True,
+                )
+            if confirm_cols[1].button("单独新增", key="manual_position_merge_no", use_container_width=True):
+                _save_manual_position_entry(
+                    pending_asset,
+                    float(pending_merge.get("quantity", 0) or 0),
+                    float(pending_merge.get("cost", 0) or 0),
+                    merge_with_existing=False,
+                )
+            if confirm_cols[2].button("取消", key="manual_position_merge_cancel", use_container_width=True):
+                st.session_state["manual_position_pending_merge"] = None
                 st.rerun()
+            if existing_item:
+                st.caption(
+                    f"现有仓位：数量 {float(existing_item.get('quantity', 0) or 0):g}，"
+                    f"成本 {float(existing_item.get('cost', 0) or 0):g}"
+                )
+
+        position_suggestions = search_all_asset_suggestions(position_text)
+        if position_suggestions and "," not in str(position_text or "") and "\n" not in str(position_text or ""):
+            st.markdown('<div class="block-label">匹配资产</div>', unsafe_allow_html=True)
+            suggestion_cols = st.columns(2)
+            for idx, item in enumerate(position_suggestions):
+                raw_symbol = str(item.get("raw_symbol", "")).strip()
+                full_symbol = str(item.get("symbol", "")).strip()
+                item_market_key = str(item.get("market_key", "")).strip()
+                market_tag = str(item.get("market", MARKET_KEY_TO_LABEL.get(item_market_key, ""))).strip()
+                with suggestion_cols[idx % 2]:
+                    title_text = str(item.get("name", full_symbol)).strip()
+                    symbol_text_line = raw_symbol if item_market_key == "cn" and raw_symbol else full_symbol
+                    if symbol_text_line != full_symbol and full_symbol:
+                        symbol_text_line = f"{symbol_text_line} ({full_symbol})"
+                    st.markdown(
+                        f"""
+                        <div class="suggestion-card">
+                            <div class="suggestion-market">{html_lib.escape(market_tag)}</div>
+                            <div class="suggestion-title">{html_lib.escape(title_text)}</div>
+                            <div class="suggestion-symbol">{html_lib.escape(symbol_text_line)}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("添加这项", key=f'manual_position_suggest_{item_market_key}_{idx}', use_container_width=True):
+                        add_manual_position_entry(item, qty_value, cost_value)
+
+        feedback_text = st.session_state.pop("manual_position_add_feedback", "")
+        if feedback_text:
+            st.success(feedback_text)
 
     positions = get_positions()
     position_df = build_positions_frame(positions)
