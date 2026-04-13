@@ -15,6 +15,7 @@ import time
 import sys
 import os
 import shutil
+import re
 
 # 确保模块路径正确
 sys.path.insert(0, os.path.dirname(__file__))
@@ -29,6 +30,11 @@ try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
     st_autorefresh = None
+
+try:
+    from st_keyup import st_keyup
+except Exception:
+    st_keyup = None
 
 
 @st.cache_resource
@@ -342,6 +348,28 @@ st.markdown("""
         color: #eaf2ff !important;
         border-color: rgba(110,170,255,0.18) !important;
     }
+    .stTextInput > div > div,
+    .stNumberInput > div > div {
+        background: #0c1728 !important;
+        border: 1px solid rgba(110,170,255,0.18) !important;
+        border-radius: 14px !important;
+    }
+    .stFileUploader [data-testid="stFileUploaderDropzone"] {
+        background: linear-gradient(180deg, #0f1a2c 0%, #0b1422 100%) !important;
+        border: 1px dashed rgba(110,170,255,0.22) !important;
+        border-radius: 14px !important;
+    }
+    .stFileUploader [data-testid="stFileUploaderDropzone"]:hover {
+        border-color: rgba(73,198,255,0.42) !important;
+        background: linear-gradient(180deg, #12213a 0%, #0d1727 100%) !important;
+    }
+    .stFileUploader [data-testid="stFileUploaderDropzone"] * {
+        color: #dce7f7 !important;
+    }
+    .stFileUploader section[data-testid="stFileUploaderDropzoneInstructions"] span,
+    .stFileUploader small {
+        color: #8ea3bd !important;
+    }
     /* 下拉框已选值文字 */
     .stSelectbox [data-baseweb="select"] span,
     .stSelectbox [data-baseweb="select"] div {
@@ -476,6 +504,43 @@ st.markdown("""
         color: var(--muted);
         background: rgba(9, 14, 22, 0.72);
     }
+    .suggestion-wrap {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin-top: 0.35rem;
+    }
+    .suggestion-card {
+        border: 1px solid rgba(110, 170, 255, 0.12);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(12, 19, 31, 0.96), rgba(8, 12, 20, 0.98));
+        padding: 0.8rem 0.95rem 0.7rem 0.95rem;
+        min-height: 92px;
+    }
+    .suggestion-market {
+        font-size: 0.74rem;
+        color: #7bc7ff;
+        letter-spacing: 0.04em;
+        margin-bottom: 0.35rem;
+        font-weight: 700;
+    }
+    .suggestion-title {
+        color: #edf4ff;
+        font-weight: 800;
+        line-height: 1.35;
+        margin-bottom: 0.18rem;
+        word-break: break-word;
+    }
+    .suggestion-symbol {
+        color: #8ea3bd;
+        font-size: 0.86rem;
+        word-break: break-all;
+    }
+    @media (max-width: 900px) {
+        .suggestion-wrap {
+            grid-template-columns: 1fr;
+        }
+    }
     @media (max-width: 1100px) {
         .news-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -525,6 +590,12 @@ def _disk_or_fetch(key: str, fetch_fn):
     return data
 
 
+def _rolling_cache_key(base_key: str, interval_seconds: int | None = None) -> str:
+    seconds = max(int(interval_seconds or config.REFRESH_INTERVAL or 300), 30)
+    bucket = int(time.time() // seconds)
+    return f"{base_key}_{bucket}"
+
+
 def get_us_watchlist() -> list[str]:
     return watchlist_store.get_watchlist("us", config.MY_US_WATCHLIST)
 
@@ -564,6 +635,61 @@ MARKET_CURRENCY = {
     "intl_futures": "USD",
     "cn_futures": "CNY",
 }
+US_SUGGESTION_LIBRARY = {
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "NVIDIA",
+    "GOOGL": "Alphabet",
+    "GOOG": "Alphabet",
+    "META": "Meta",
+    "AMZN": "Amazon",
+    "TSLA": "Tesla",
+    "BABA": "Alibaba",
+    "PDD": "PDD Holdings",
+    "JD": "JD.com",
+    "BIDU": "Baidu",
+    "NFLX": "Netflix",
+    "AMD": "AMD",
+    "INTC": "Intel",
+    "ORCL": "Oracle",
+    "CRM": "Salesforce",
+    "UBER": "Uber",
+    "SHOP": "Shopify",
+    "PYPL": "PayPal",
+    "DIS": "Disney",
+    "BRKB": "Berkshire Hathaway",
+    "AVGO": "Broadcom",
+    "QCOM": "Qualcomm",
+    "MU": "Micron",
+    "PLTR": "Palantir",
+    "SNOW": "Snowflake",
+    "SQ": "Block",
+    "COIN": "Coinbase",
+    "MSTR": "MicroStrategy",
+    "SMCI": "Super Micro Computer",
+    "ANET": "Arista Networks",
+    "PANW": "Palo Alto Networks",
+    "CRWD": "CrowdStrike",
+    "ADBE": "Adobe",
+    "NOW": "ServiceNow",
+    "SAP": "SAP",
+    "ASML": "ASML",
+    "ARM": "Arm Holdings",
+    "AMAT": "Applied Materials",
+    "TSM": "Taiwan Semiconductor",
+    "NIO": "NIO",
+    "XPEV": "XPeng",
+    "LI": "Li Auto",
+    "BEKE": "KE Holdings",
+    "BILI": "Bilibili",
+    "BIDU": "Baidu",
+    "GEV": "GE Vernova",
+    "BE": "Bloom Energy",
+    "QQQ": "Invesco QQQ Trust",
+    "SPY": "SPDR S&P 500 ETF",
+    "DIA": "SPDR Dow Jones Industrial Average ETF",
+    "IWM": "iShares Russell 2000 ETF",
+}
 
 MARKET_LABEL_TO_KEY = {meta["label"]: key for key, meta in MARKET_CONFIG.items()}
 MARKET_KEY_TO_LABEL = {key: meta["label"] for key, meta in MARKET_CONFIG.items()}
@@ -571,30 +697,42 @@ MARKET_KEY_TO_LABEL = {key: meta["label"] for key, meta in MARKET_CONFIG.items()
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_us_data(watchlist: tuple[str, ...], _version: str = "v3_user_watchlist"):
     watch_key = "_".join(watchlist) if watchlist else "empty"
-    return _disk_or_fetch(f"us_data_{watch_key}", lambda: us_stocks.get_quote(list(watchlist)))
+    return _disk_or_fetch(
+        _rolling_cache_key(f"us_data_{watch_key}"),
+        lambda: us_stocks.get_quote(list(watchlist)),
+    )
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_us_index():
     syms = ["^GSPC", "^IXIC", "^DJI"]
-    return _disk_or_fetch("us_index", lambda: us_stocks.get_quote(syms))
+    return _disk_or_fetch(_rolling_cache_key("us_index"), lambda: us_stocks.get_quote(syms))
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_index(_tushare_ready: bool = False):
     # _tushare_ready 作为 cache key 的一部分，确保 tushare 初始化后不复用旧缓存
-    return _disk_or_fetch("cn_index", cn_stocks.get_index_quote)
+    return _disk_or_fetch(_rolling_cache_key("cn_index"), cn_stocks.get_index_quote)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_stocks(_tushare_ready: bool = False):
-    return _disk_or_fetch("cn_stocks", lambda: cn_stocks.get_stock_quote(config.MY_CN_WATCHLIST))
+    return _disk_or_fetch(
+        _rolling_cache_key("cn_stocks"),
+        lambda: cn_stocks.get_stock_quote(config.MY_CN_WATCHLIST),
+    )
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_watchlist_data(watchlist: tuple[str, ...], _tushare_ready: bool = False):
     watch_key = "_".join(watchlist) if watchlist else "empty"
-    return _disk_or_fetch(f"cn_watch_{watch_key}", lambda: cn_stocks.get_stock_quote(list(watchlist)))
+    return _disk_or_fetch(
+        _rolling_cache_key(f"cn_watch_{watch_key}"),
+        lambda: cn_stocks.get_stock_quote(list(watchlist)),
+    )
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_futures():
-    return _disk_or_fetch("intl_futures_v2", lambda: futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES))
+    return _disk_or_fetch(
+        _rolling_cache_key("intl_futures_v2"),
+        lambda: futures.get_intl_futures_quote(config.MY_FUTURES_CATEGORIES),
+    )
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_intl_futures_watchlist_data(watchlist: tuple[str, ...]):
@@ -608,11 +746,11 @@ def load_intl_futures_watchlist_data(watchlist: tuple[str, ...]):
             return df.iloc[0:0].copy()
         return df[df["代码"].isin(list(watchlist))].reset_index(drop=True)
 
-    return _disk_or_fetch(f"intl_fut_watch_v2_{watch_key}", _fetch)
+    return _disk_or_fetch(_rolling_cache_key(f"intl_fut_watch_v2_{watch_key}"), _fetch)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_futures():
-    return _disk_or_fetch("cn_futures", futures.get_cn_futures_quote)
+    return _disk_or_fetch(_rolling_cache_key("cn_futures"), futures.get_cn_futures_quote)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_cn_futures_watchlist_data(watchlist: tuple[str, ...]):
@@ -626,15 +764,18 @@ def load_cn_futures_watchlist_data(watchlist: tuple[str, ...]):
             return df.iloc[0:0].copy()
         return df[df["品种"].isin(list(watchlist))].reset_index(drop=True)
 
-    return _disk_or_fetch(f"cn_fut_watch_{watch_key}", _fetch)
+    return _disk_or_fetch(_rolling_cache_key(f"cn_fut_watch_{watch_key}"), _fetch)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_sector_performance():
-    return _disk_or_fetch("sector_perf", us_stocks.get_sector_performance)
+    return _disk_or_fetch(_rolling_cache_key("sector_perf"), us_stocks.get_sector_performance)
 
 @st.cache_data(ttl=config.REFRESH_INTERVAL)
 def load_sector_constituents():
-    return _disk_or_fetch("sector_constituents", us_stocks.get_sector_constituent_performance)
+    return _disk_or_fetch(
+        _rolling_cache_key("sector_constituents"),
+        us_stocks.get_sector_constituent_performance,
+    )
 
 @st.cache_data(ttl=3600)
 def load_earnings_calendar(watchlist: tuple[str, ...]):
@@ -894,6 +1035,253 @@ def parse_symbol_input(raw_text: str, uppercase: bool = True) -> list[str]:
             continue
         symbols.append(cleaned.upper() if uppercase else cleaned)
     return symbols
+
+
+def normalize_symbols_for_market(symbols: list[str], market_key: str) -> list[str]:
+    normalized = []
+    seen = set()
+    for raw_symbol in symbols or []:
+        symbol = str(raw_symbol or "").strip()
+        if not symbol:
+            continue
+        if market_key == "cn":
+            upper_symbol = symbol.upper()
+            if "." not in upper_symbol and upper_symbol.isdigit() and len(upper_symbol) == 6:
+                suffix = ".SH" if upper_symbol.startswith(("5", "6", "9")) else ".SZ"
+                symbol = f"{upper_symbol}{suffix}"
+            else:
+                symbol = upper_symbol
+        elif market_key != "cn_futures":
+            symbol = symbol.upper()
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append(symbol)
+    return normalized
+
+
+def _normalize_search_text(text: str) -> str:
+    cleaned = re.sub(r"[^A-Z0-9\u4e00-\u9fff]+", "", str(text or "").upper())
+    if cleaned.endswith("S") and len(cleaned) > 3:
+        cleaned = cleaned[:-1]
+    return cleaned
+
+
+@st.cache_data(ttl=3600 * 24)
+def load_cn_stock_basic_catalog() -> list[dict]:
+    try:
+        pro = _cached_pro or getattr(cn_stocks, "_pro", None)
+        if pro is None:
+            return []
+        df = pro.stock_basic(
+            exchange="",
+            list_status="L",
+            fields="ts_code,symbol,name",
+        )
+        if df is None or df.empty:
+            return []
+        records = []
+        for _, row in df.iterrows():
+            ts_code = str(row.get("ts_code", "")).strip().upper()
+            symbol = str(row.get("symbol", "")).strip().upper()
+            name = str(row.get("name", "")).strip()
+            if not ts_code:
+                continue
+            records.append(
+                {
+                    "symbol": ts_code,
+                    "raw_symbol": symbol or ts_code.split(".")[0],
+                    "name": name or ts_code,
+                    "market": "中国股票",
+                    "market_key": "cn",
+                }
+            )
+        return records
+    except Exception as e:
+        print(f"[Suggest] A股基础清单加载失败: {e}")
+        return []
+
+
+@st.cache_data(ttl=3600)
+def build_asset_suggestion_catalog() -> dict[str, list[dict]]:
+    catalog: dict[str, list[dict]] = {
+        "us": [],
+        "cn": [],
+        "intl_futures": [],
+        "cn_futures": [],
+    }
+
+    us_seen = set()
+    us_symbols = []
+    for group_symbols in us_stocks.DEFAULT_US_STOCKS.values():
+        us_symbols.extend(group_symbols)
+    us_symbols.extend(us_stocks.STOCK_DISPLAY_NAMES.keys())
+    us_symbols.extend(US_SUGGESTION_LIBRARY.keys())
+    us_symbols.extend(config.MY_US_WATCHLIST)
+    for symbol in us_symbols:
+        sym = str(symbol or "").strip().upper()
+        if not sym or sym in us_seen:
+            continue
+        us_seen.add(sym)
+        name = (
+            us_stocks.INDEX_NAMES.get(sym)
+            or us_stocks.STOCK_DISPLAY_NAMES.get(sym)
+            or US_SUGGESTION_LIBRARY.get(sym)
+            or sym
+        )
+        catalog["us"].append({"symbol": sym, "raw_symbol": sym, "name": name, "market": "美国股票", "market_key": "us"})
+
+    cn_seen = set()
+    cn_catalog = load_cn_stock_basic_catalog()
+    if cn_catalog:
+        for item in cn_catalog:
+            sym = str(item.get("symbol", "")).strip().upper()
+            if not sym or sym in cn_seen:
+                continue
+            cn_seen.add(sym)
+            catalog["cn"].append(item)
+    else:
+        cn_items = []
+        for group in cn_stocks.DEFAULT_CN_STOCKS.values():
+            cn_items.extend(group)
+        for symbol in config.MY_CN_WATCHLIST:
+            cn_items.append((symbol, symbol))
+        for symbol, name in cn_items:
+            sym = str(symbol or "").strip().upper()
+            if not sym or sym in cn_seen:
+                continue
+            cn_seen.add(sym)
+            catalog["cn"].append(
+                {
+                    "symbol": sym,
+                    "raw_symbol": sym.split(".")[0],
+                    "name": str(name or sym).strip(),
+                    "market": "中国股票",
+                    "market_key": "cn",
+                }
+            )
+
+    intl_seen = set()
+    for category, items in futures.INTL_FUTURES.items():
+        for symbol, name in items:
+            sym = str(symbol or "").strip().upper()
+            if not sym or sym in intl_seen:
+                continue
+            intl_seen.add(sym)
+            catalog["intl_futures"].append({"symbol": sym, "name": str(name or sym).strip(), "market": f"国际期货 · {category}", "market_key": "intl_futures"})
+
+    cn_fut_seen = set()
+    for name, (product_prefix, exchange) in CN_FUTURES_TS_CODE.items():
+        sym = str(name or "").strip()
+        if not sym or sym in cn_fut_seen:
+            continue
+        cn_fut_seen.add(sym)
+        catalog["cn_futures"].append({"symbol": sym, "name": sym, "market": f"国内期货 · {exchange}", "market_key": "cn_futures"})
+
+    return catalog
+
+
+def search_asset_suggestions(query: str, market_key: str, limit: int = 8) -> list[dict]:
+    text = str(query or "").strip()
+    if not text:
+        return []
+    normalized_query = text.upper()
+    if market_key == "cn":
+        normalized_candidates = normalize_symbols_for_market([normalized_query], "cn")
+        normalized_query = normalized_candidates[0] if normalized_candidates else normalized_query
+    folded_query = _normalize_search_text(normalized_query)
+
+    candidates = build_asset_suggestion_catalog().get(market_key, [])
+    scored = []
+    for item in candidates:
+        symbol = str(item.get("symbol", "")).strip()
+        raw_symbol = str(item.get("raw_symbol", "")).strip()
+        name = str(item.get("name", "")).strip()
+        symbol_upper = symbol.upper()
+        raw_symbol_upper = raw_symbol.upper()
+        name_upper = name.upper()
+        folded_symbol = _normalize_search_text(symbol_upper)
+        folded_raw_symbol = _normalize_search_text(raw_symbol_upper)
+        folded_name = _normalize_search_text(name_upper)
+        score = None
+        if symbol_upper == normalized_query or raw_symbol_upper == normalized_query or name_upper == normalized_query:
+            score = 0
+        elif folded_query and (folded_symbol == folded_query or folded_raw_symbol == folded_query or folded_name == folded_query):
+            score = 0
+        elif (
+            symbol_upper.startswith(normalized_query)
+            or raw_symbol_upper.startswith(normalized_query)
+            or name_upper.startswith(normalized_query)
+        ):
+            score = 1
+        elif folded_query and (
+            folded_symbol.startswith(folded_query)
+            or folded_raw_symbol.startswith(folded_query)
+            or folded_name.startswith(folded_query)
+        ):
+            score = 1
+        elif normalized_query in symbol_upper or normalized_query in raw_symbol_upper or normalized_query in name_upper:
+            score = 2
+        elif folded_query and (
+            folded_query in folded_symbol
+            or folded_query in folded_raw_symbol
+            or folded_query in folded_name
+        ):
+            score = 2
+        if score is not None:
+            scored.append((score, len(symbol), name, item))
+    scored.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [item for _, _, _, item in scored[:limit]]
+
+
+def search_all_asset_suggestions(query: str, limit: int = 10) -> list[dict]:
+    text = str(query or "").strip()
+    if not text:
+        return []
+    all_items = []
+    for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
+        all_items.extend(search_asset_suggestions(text, market_key, limit=limit))
+    deduped = []
+    seen = set()
+    for item in all_items:
+        token = (str(item.get("market_key", "")), str(item.get("symbol", "")))
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(item)
+    return deduped[:limit]
+
+
+def infer_market_for_manual_watch(query: str) -> tuple[str | None, list[str]]:
+    text = str(query or "").strip()
+    if not text:
+        return None, []
+    parsed = parse_symbol_input(text, uppercase=True)
+    suggestions = search_all_asset_suggestions(text, limit=6)
+    exact_matches = [
+        item for item in suggestions
+        if _normalize_search_text(item.get("symbol", "")) == _normalize_search_text(text)
+        or _normalize_search_text(item.get("raw_symbol", "")) == _normalize_search_text(text)
+        or _normalize_search_text(item.get("name", "")) == _normalize_search_text(text)
+    ]
+    if len(exact_matches) == 1:
+        item = exact_matches[0]
+        return str(item.get("market_key", "")).strip(), [str(item.get("symbol", "")).strip()]
+
+    if len(parsed) == 1:
+        raw = parsed[0]
+        upper = raw.upper()
+        if upper.endswith("=F"):
+            return "intl_futures", [upper]
+        if "." in upper and upper.endswith((".SH", ".SZ")):
+            return "cn", normalize_symbols_for_market([upper], "cn")
+        if upper.isdigit() and len(upper) == 6:
+            return "cn", normalize_symbols_for_market([upper], "cn")
+        if raw in CN_FUTURES_TS_CODE:
+            return "cn_futures", [raw]
+        if re.fullmatch(r"[A-Z.\-]{1,10}", upper):
+            return "us", [upper]
+    return None, []
 
 
 def get_market_data(market_key: str, symbols: list[str]) -> pd.DataFrame:
@@ -1389,7 +1777,10 @@ def load_global_market_snapshot():
         "^AXJO": ("ASX 200", "亚洲", 94, 70),
     }
 
-    df = us_stocks.get_quote(list(symbol_map.keys()))
+    df = _disk_or_fetch(
+        _rolling_cache_key("global_market_snapshot"),
+        lambda: us_stocks.get_quote(list(symbol_map.keys())),
+    )
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -3402,18 +3793,68 @@ elif page == "🧾 自选管理":
         render_import_preview("watchlist")
 
     with panel("手动新增自选"):
-        add_cols = st.columns([1.2, 1.6, 1], vertical_alignment="bottom")
-        market_label = add_cols[0].selectbox("市场", list(MARKET_LABEL_TO_KEY.keys()), key="manual_watch_market")
-        symbol_text = add_cols[1].text_input("代码", placeholder="支持逗号批量输入", key="manual_watch_symbols")
-        if add_cols[2].button("添加到自选", key="manual_watch_add_btn", use_container_width=True):
-            market_key = get_market_key_from_label(market_label)
-            symbols = parse_symbol_input(symbol_text, uppercase=(market_key != "cn_futures"))
-            if not symbols:
+        add_cols = st.columns([2.4, 1], vertical_alignment="bottom")
+        if st_keyup is not None:
+            with add_cols[0]:
+                symbol_text = st_keyup(
+                    "代码或名称",
+                    value=st.session_state.get("manual_watch_symbols", ""),
+                    placeholder="支持代码、名称、逗号批量输入",
+                    key="manual_watch_symbols_keyup",
+                    debounce=0,
+                    label_visibility="collapsed",
+                )
+                st.session_state["manual_watch_symbols"] = symbol_text
+        else:
+            symbol_text = add_cols[0].text_input("代码或名称", placeholder="支持代码、名称、逗号批量输入", key="manual_watch_symbols", label_visibility="collapsed")
+        add_cols[0].markdown('<div class="block-label">代码或名称</div>', unsafe_allow_html=True)
+        if add_cols[1].button("添加到自选", key="manual_watch_add_btn", use_container_width=True):
+            market_key, symbols = infer_market_for_manual_watch(symbol_text)
+            if not market_key or not symbols:
                 st.warning("请先输入至少一个代码。")
             else:
-                watchlist_store.save_watchlist(market_key, watchlists.get(market_key, []) + symbols)
+                existing_symbols = watchlists.get(market_key, [])
+                merged_symbols = normalize_symbols_for_market(existing_symbols + symbols, market_key)
+                new_count = max(len(merged_symbols) - len(normalize_symbols_for_market(existing_symbols, market_key)), 0)
+                watchlist_store.save_watchlist(market_key, merged_symbols)
+                st.session_state["manual_watch_add_feedback"] = f"已添加 {new_count} 项到 {MARKET_KEY_TO_LABEL.get(market_key, market_key)}：{', '.join(symbols)}"
                 st.cache_data.clear()
                 st.rerun()
+        suggestions = search_all_asset_suggestions(symbol_text)
+        if suggestions and "," not in str(symbol_text or "") and "\n" not in str(symbol_text or ""):
+            st.markdown('<div class="block-label">匹配资产</div>', unsafe_allow_html=True)
+            suggestion_cols = st.columns(2)
+            for idx, item in enumerate(suggestions):
+                raw_symbol = str(item.get("raw_symbol", "")).strip()
+                full_symbol = str(item.get("symbol", "")).strip()
+                item_market_key = str(item.get("market_key", "")).strip()
+                market_tag = str(item.get("market", MARKET_KEY_TO_LABEL.get(item_market_key, ""))).strip()
+                with suggestion_cols[idx % 2]:
+                    title_text = str(item.get("name", full_symbol)).strip()
+                    symbol_text_line = raw_symbol if item_market_key == "cn" and raw_symbol else full_symbol
+                    if symbol_text_line != full_symbol and full_symbol:
+                        symbol_text_line = f"{symbol_text_line} ({full_symbol})"
+                    st.markdown(
+                        f"""
+                        <div class="suggestion-card">
+                            <div class="suggestion-market">{html_lib.escape(market_tag)}</div>
+                            <div class="suggestion-title">{html_lib.escape(title_text)}</div>
+                            <div class="suggestion-symbol">{html_lib.escape(symbol_text_line)}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("添加这项", key=f'manual_watch_suggest_{item_market_key}_{idx}', use_container_width=True):
+                        existing_symbols = watchlists.get(item_market_key, [])
+                        merged_symbols = normalize_symbols_for_market(existing_symbols + [item["symbol"]], item_market_key)
+                        new_count = max(len(merged_symbols) - len(normalize_symbols_for_market(existing_symbols, item_market_key)), 0)
+                        watchlist_store.save_watchlist(item_market_key, merged_symbols)
+                        st.session_state["manual_watch_add_feedback"] = f'已添加 {new_count} 项到 {MARKET_KEY_TO_LABEL.get(item_market_key, item_market_key)}：{item["symbol"]}'
+                        st.cache_data.clear()
+                        st.rerun()
+        feedback_text = st.session_state.pop("manual_watch_add_feedback", "")
+        if feedback_text:
+            st.success(feedback_text)
 
     for market_key in ["us", "cn", "intl_futures", "cn_futures"]:
         market_label = MARKET_KEY_TO_LABEL[market_key]
