@@ -550,6 +550,21 @@ st.markdown("""
         .news-grid {
             grid-template-columns: 1fr;
         }
+        [data-testid="stPlotlyChart"] {
+            touch-action: pinch-zoom !important;
+        }
+        [data-testid="stPlotlyChart"] > div,
+        [data-testid="stPlotlyChart"] .js-plotly-plot,
+        [data-testid="stPlotlyChart"] .plot-container,
+        [data-testid="stPlotlyChart"] .svg-container {
+            touch-action: pinch-zoom !important;
+        }
+        [data-testid="stPlotlyChart"] .draglayer,
+        [data-testid="stPlotlyChart"] .nsewdrag,
+        [data-testid="stPlotlyChart"] .zoombox,
+        [data-testid="stPlotlyChart"] .plotly .main-svg {
+            touch-action: none !important;
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -1067,6 +1082,38 @@ def _normalize_search_text(text: str) -> str:
     return cleaned
 
 
+def _lookup_catalog_name(market_key: str, symbol: str) -> str:
+    normalized_symbol = str(symbol or "").strip().upper()
+    raw_symbol = normalized_symbol.split(".")[0] if market_key == "cn" else normalized_symbol
+    for item in build_asset_suggestion_catalog().get(market_key, []):
+        item_symbol = str(item.get("symbol", "")).strip().upper()
+        item_raw_symbol = str(item.get("raw_symbol", "")).strip().upper()
+        if normalized_symbol and (item_symbol == normalized_symbol or item_raw_symbol == raw_symbol):
+            return str(item.get("name", "")).strip()
+    return ""
+
+
+def get_canonical_asset_name(
+    market_key: str,
+    symbol: str,
+    fallback_name: str = "",
+    quote_name: str = "",
+) -> str:
+    normalized_symbol = str(symbol or "").strip().upper()
+    for candidate in [
+        str(quote_name or "").strip(),
+        us_stocks.INDEX_NAMES.get(normalized_symbol, "") if market_key == "us" else "",
+        us_stocks.STOCK_DISPLAY_NAMES.get(normalized_symbol, "") if market_key == "us" else "",
+        US_SUGGESTION_LIBRARY.get(normalized_symbol, "") if market_key == "us" else "",
+        _lookup_catalog_name(market_key, normalized_symbol),
+        str(fallback_name or "").strip(),
+        normalized_symbol,
+    ]:
+        if candidate:
+            return candidate
+    return normalized_symbol
+
+
 @st.cache_data(ttl=3600 * 24)
 def load_cn_stock_basic_catalog() -> list[dict]:
     try:
@@ -1339,7 +1386,11 @@ def _save_manual_position_entry(asset_item: dict, quantity: float, cost: float, 
     market_key = str(asset_item.get("market_key", "")).strip()
     symbol = str(asset_item.get("symbol", "")).strip()
     market_label = MARKET_KEY_TO_LABEL.get(market_key, str(asset_item.get("market", "")).strip() or market_key)
-    asset_name = str(asset_item.get("name", symbol)).strip() or symbol
+    asset_name = get_canonical_asset_name(
+        market_key,
+        symbol,
+        fallback_name=str(asset_item.get("name", symbol)).strip() or symbol,
+    )
     existing_index = _find_existing_position_index(market_label, symbol)
 
     if merge_with_existing and existing_index is not None:
@@ -1439,17 +1490,18 @@ def build_watchlist_market_frame(market_key: str, symbols: list[str]) -> pd.Data
     if df is None or df.empty:
         fallback_rows = []
         for symbol in symbols:
+            canonical_name = get_canonical_asset_name(market_key, symbol, fallback_name=symbol)
             fallback_rows.append(
                 {
                     "市场": market_label,
-                    "资产名称": symbol,
+                    "资产名称": canonical_name,
                     "资产代码": symbol,
                     "现价": "",
                     "涨跌额": "",
                     "涨跌幅%": "",
                     "更新时间": "",
                     "asset_symbol": symbol,
-                    "asset_name": symbol,
+                    "asset_name": canonical_name,
                     "asset_type": get_market_asset_type(market_key),
                 }
             )
@@ -1460,10 +1512,18 @@ def build_watchlist_market_frame(market_key: str, symbols: list[str]) -> pd.Data
     out["_display_order"] = out[symbol_col].astype(str).str.strip().str.upper().map(order_map).fillna(len(symbols))
     out = out.sort_values("_display_order").drop(columns="_display_order").reset_index(drop=True)
     out["市场"] = market_label
-    out["资产名称"] = out[name_col]
     out["资产代码"] = out[symbol_col]
+    out["资产名称"] = out.apply(
+        lambda row: get_canonical_asset_name(
+            market_key,
+            str(row.get(symbol_col, "")),
+            fallback_name=str(row.get(name_col, "")),
+            quote_name=str(row.get(name_col, "")),
+        ),
+        axis=1,
+    )
     out["asset_symbol"] = out[symbol_col]
-    out["asset_name"] = out[name_col]
+    out["asset_name"] = out["资产名称"]
     out["asset_type"] = get_market_asset_type(market_key)
     return out
 
@@ -1577,7 +1637,12 @@ def get_position_quote_row(position: dict) -> dict:
     name_col = config_meta["name_col"]
     row = df.iloc[0].to_dict()
     row["asset_symbol"] = row.get(symbol_col, symbol)
-    row["asset_name"] = row.get(name_col, position.get("name", symbol))
+    row["asset_name"] = get_canonical_asset_name(
+        market_key,
+        str(row.get(symbol_col, symbol)),
+        fallback_name=str(position.get("name", symbol)),
+        quote_name=str(row.get(name_col, "")),
+    )
     row["asset_type"] = config_meta["asset_type"]
     return row
 
@@ -1604,7 +1669,12 @@ def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
             cost = 0.0
         market_label = position.get("market", "")
         symbol = position.get("symbol", "")
-        name = position.get("name") or quote_row.get("asset_name") or symbol
+        name = get_canonical_asset_name(
+            market_key,
+            symbol,
+            fallback_name=str(position.get("name", "")),
+            quote_name=str(quote_row.get("asset_name", "")),
+        )
         market_key = get_market_key_from_label(market_label)
         asset_type = get_market_asset_type(market_key)
         quote_currency = get_market_currency(market_key)
@@ -2990,9 +3060,7 @@ def show_asset_detail(symbol: str, display_name: str, asset_type: str = "us_stoc
         else:
             hist = pd.DataFrame()
 
-    if not hist.empty:
-        render_kline(hist, display_name)
-    else:
+    if hist.empty:
         st.info("暂无K线数据")
         return
 
@@ -3026,12 +3094,16 @@ def show_asset_detail(symbol: str, display_name: str, asset_type: str = "us_stoc
         with st.spinner("生成资产 AI 分析…"):
             st.markdown(get_ai_market_asset_analysis(symbol, display_name, asset_type, kline_key, hist))
 
+    st.divider()
+    render_kline(hist, display_name)
+
 
 def render_kline(df: pd.DataFrame, title: str):
     """渲染专业 K 线图 + 成交量 + 技术指标"""
     if df is None or df.empty:
         st.info("暂无图表数据")
         return
+    mobile_mode = _is_mobile_request()
 
     # 计算技术指标
     df = df.copy()
@@ -3117,7 +3189,7 @@ def render_kline(df: pd.DataFrame, title: str):
             text=f"{title}　<span style='color:{color};font-size:14px'>{sign} {abs(chg):.2f}%　{latest:.2f}</span>",
             font=dict(size=16, color="#edf4ff"),
         ),
-        height=560,
+        height=440 if mobile_mode else 560,
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=55, b=10),
         legend=dict(
@@ -3159,8 +3231,18 @@ def render_kline(df: pd.DataFrame, title: str):
         row=2, col=1,
     )
 
-    fig.update_layout(dragmode="pan")
-    st.plotly_chart(fig, width='stretch', config={"scrollZoom": True})
+    fig.update_layout(dragmode="zoom" if mobile_mode else "pan")
+    st.plotly_chart(
+        fig,
+        width='stretch',
+        config={
+            "scrollZoom": True,
+            "doubleClick": "reset",
+            "displayModeBar": mobile_mode,
+            "modeBarButtonsToAdd": ["zoom2d", "pan2d", "resetScale2d"],
+            "responsive": True,
+        },
+    )
 
 
 def render_metrics_row(df: pd.DataFrame, name_col: str, price_col: str, pct_col: str, n_cols: int = 3, sparklines: dict = None, detail_type: str = "", symbol_col: str = "代码"):
@@ -3381,7 +3463,11 @@ def render_positions_row_actions(df: pd.DataFrame, positions: list[dict], key_pr
                                 {
                                     "market": str(original.get("market", "")),
                                     "symbol": str(original.get("symbol", "")),
-                                    "name": str(original.get("name", "")),
+                                    "name": get_canonical_asset_name(
+                                        get_market_key_from_label(str(original.get("market", ""))),
+                                        str(original.get("symbol", "")),
+                                        fallback_name=str(original.get("name", "")),
+                                    ),
                                     "quantity": new_quantity,
                                     "cost": new_cost,
                                     "note": original.get("note", ""),
