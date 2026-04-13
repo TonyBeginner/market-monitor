@@ -1669,13 +1669,13 @@ def build_positions_frame(positions: list[dict]) -> pd.DataFrame:
             cost = 0.0
         market_label = position.get("market", "")
         symbol = position.get("symbol", "")
+        market_key = get_market_key_from_label(market_label)
         name = get_canonical_asset_name(
             market_key,
             symbol,
             fallback_name=str(position.get("name", "")),
             quote_name=str(quote_row.get("asset_name", "")),
         )
-        market_key = get_market_key_from_label(market_label)
         asset_type = get_market_asset_type(market_key)
         quote_currency = get_market_currency(market_key)
         hist = get_position_history(asset_type, symbol)
